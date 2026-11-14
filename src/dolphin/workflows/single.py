@@ -396,9 +396,33 @@ def run_wrapped_phase_single(
                 out_datas.update(
                     {k: np.asarray(v) for k, v in pl_output.gate._asdict().items()}
                 )
+            gate_keys = pl_output.gate._fields if write_consistency else ()
             for key, data in out_datas.items():
                 output_file = output_files[key]
                 trimmed_data = data[out_trim_rows, out_trim_cols]
+                if key in gate_keys:
+                    # NaN is a value in these layers (no long entry admitted),
+                    # so eroding by their own NaNs would erase valid pixels
+                    # around every chain-only pixel. Give them the footprint
+                    # of temporal coherence instead.
+                    footprint = grow_nodata_region(
+                        pl_output.temp_coh[out_trim_rows, out_trim_cols],
+                        nodata=output_files["temporal_coherence"].nodata,
+                        n_pixels=2,
+                        copy=True,
+                    )
+                    trimmed_data = np.where(
+                        footprint == output_files["temporal_coherence"].nodata,
+                        np.nan,
+                        trimmed_data,
+                    ).astype(np.float32)
+                    writer.queue_write(
+                        trimmed_data,
+                        output_file.filename,
+                        out_rows.start,
+                        out_cols.start,
+                    )
+                    continue
 
                 writer.queue_write(
                     # Erode the edge pixels before writing:

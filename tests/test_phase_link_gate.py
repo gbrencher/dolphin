@@ -141,3 +141,15 @@ def test_run_cpl_with_gate_returns_layers():
     assert np.all((np.asarray(out.temp_coh) >= 0) & (np.asarray(out.temp_coh) <= 1))
     plain = _core.run_cpl(samples, HalfWindow(x=4, y=4), Strides(x=1, y=1), compute_crlb=False)
     assert plain.gate is None
+
+
+def test_run_phase_linking_keeps_gate_layers():
+    C, _ = simulate.simulate_coh(num_acq=N, add_signal=True)
+    samples = simulate.simulate_neighborhood_stack(C, 9 * 9).reshape(N, 9, 9)
+    out = _core.run_phase_linking(
+        samples, HalfWindow(x=4, y=4), Strides(x=1, y=1),
+        use_weighted_evd=True, coherence_floor=0.2, consistency_gate="lag",
+        compute_crlb=False,
+    )
+    assert out.gate is not None
+    assert np.asarray(out.gate.max_consistent_lag).shape == (9, 9)
