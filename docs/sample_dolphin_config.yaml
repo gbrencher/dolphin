@@ -143,6 +143,24 @@ phase_linking:
   #   How the EVD/EMI eigenvectors are found: iterative (default) or exact.
   #   Type: string.
   eigen_solver: iterative
+  #   Weighted eigenvector estimator instead of EMI/EVD; handles a gated matrix.
+  #   Type: boolean.
+  use_weighted_evd: false
+  #   Coherence floor for entries beyond keep_lag, by false-admission probability.
+  #   Type: number | null.
+  coherence_floor_false_admission:
+  #   Per-pixel consistency gate: none, entry, lag or chain.
+  #   Type: string.
+  consistency_gate: none
+  #   Consistency threshold in units of the Cramer-Rao noise.
+  #   Type: number.
+  consistency_k: 3.0
+  #   Lags up to this value are never dropped by the gate.
+  #   Type: integer.
+  keep_lag: 1
+  #   Write the per-pixel gate layers beside temporal coherence.
+  #   Type: boolean.
+  write_consistency: false
   # Beta regularization parameter for correlation matrix inversion. 0 is no regularization.
   #   Type: number.
   beta: 0.0

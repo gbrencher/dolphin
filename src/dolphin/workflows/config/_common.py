@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     field_validator,
+    model_validator,
 )
 
 from dolphin import __version__ as _dolphin_version
@@ -118,6 +119,62 @@ class PhaseLinkingOptions(BaseModel, extra="forbid"):
             " converge within their budget."
         ),
     )
+    use_weighted_evd: bool = Field(
+        False,
+        description=(
+            "Use the largest eigenvector of the phase matrix weighted entry-wise by"
+            " the Cramer-Rao inverse phase variance instead of EMI or EVD. Needs no"
+            " inverse of |Gamma|, so it handles a gated (sparse) coherence matrix by"
+            " design; always solved exactly on the host. Mutually exclusive with"
+            " `use_evd`."
+        ),
+    )
+    coherence_floor_false_admission: Optional[float] = Field(
+        None,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Drop coherence-matrix entries beyond `keep_lag` whose sample coherence"
+            " is below the magnitude that a truly incoherent entry exceeds with this"
+            " probability at the window's nominal look count (e.g. 1e-6). None"
+            " applies no floor."
+        ),
+    )
+    consistency_gate: Literal["none", "entry", "lag", "chain"] = Field(
+        "none",
+        description=(
+            "Per-pixel gate on coherence-matrix entries beyond `keep_lag` by their"
+            " agreement with the chained nearest-neighbour phases: 'entry' drops an"
+            " entry whose lag bias exceeds `consistency_k` times its Cramer-Rao"
+            " noise; 'lag' pools the bias per lag and admits lags in order until the"
+            " first inconsistent one; 'chain' drops every entry beyond `keep_lag`."
+        ),
+    )
+    consistency_k: float = Field(
+        3.0, gt=0.0, description="Consistency threshold in units of the noise."
+    )
+    keep_lag: int = Field(
+        1, ge=1, description="Lags up to this value are never dropped by the gate."
+    )
+    write_consistency: bool = Field(
+        False,
+        description=(
+            "Write the per-pixel gate layers beside temporal coherence:"
+            " max_consistent_lag, admitted_fraction, inconsistent_admitted and"
+            " admitted_bias (radians). Requires a floor or a gate."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_estimator_choice(self):
+        if self.use_evd and self.use_weighted_evd:
+            msg = "use_evd and use_weighted_evd are mutually exclusive"
+            raise ValueError(msg)
+        gated = self.coherence_floor_false_admission or self.consistency_gate != "none"
+        if self.write_consistency and not gated:
+            msg = "write_consistency requires a coherence floor or a consistency gate"
+            raise ValueError(msg)
+        return self
 
     beta: float = Field(
         0.00,

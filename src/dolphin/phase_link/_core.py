@@ -17,6 +17,7 @@ from dolphin.utils import take_looks
 
 from . import covariance, crlb, metrics
 from ._closure_phase import compute_nearest_closure_phases_batch
+from ._gate import GateOutput, gate_coherence_matrices
 from ._eigenvalues import (
     eigh_largest_stack,
     eigh_largest_stack_exact,
@@ -40,6 +41,8 @@ class EstimatorType(IntEnum):
 
     EVD = 0
     EMI = 1
+    WEVD = 2
+    """Largest eigenvector of the phase matrix weighted by Cramer-Rao precision."""
 
 
 class PhaseLinkOutput(NamedTuple):
@@ -73,6 +76,9 @@ class PhaseLinkOutput(NamedTuple):
     closure_phases: np.ndarray
     """The closure phases at each pixel, for N-2 images."""
 
+    gate: Optional[GateOutput] = None
+    """Per-pixel layers from gating the coherence matrix, if a gate was applied."""
+
 
 def run_phase_linking(
     slc_stack: ArrayLike,
@@ -93,6 +99,11 @@ def run_phase_linking(
     first_real_slc_idx: int = 0,
     compute_crlb: bool = True,
     eigen_solver: str = "iterative",
+    use_weighted_evd: bool = False,
+    coherence_floor: float = 0.0,
+    consistency_gate: str = "none",
+    consistency_k: float = 3.0,
+    keep_lag: int = 1,
 ) -> PhaseLinkOutput:
     """Estimate the linked phase for a stack of SLCs.
 
@@ -162,6 +173,22 @@ def run_phase_linking(
         separated leading eigenvalue; "exact" uses a full Hermitian
         eigendecomposition per pixel, needed when the coherence matrix is
         sparse (`baseline_lag`, or gated entries) and the eigenvalues cluster.
+    use_weighted_evd : bool, optional
+        Use the largest eigenvector of the phase matrix weighted entry-wise by
+        the Cramer-Rao inverse phase variance g^2 / (1 - g^2), zero weight on
+        zeroed entries, instead of EMI or EVD. Maximum-likelihood phase linking
+        under the independent-interferogram approximation; needs no inverse of
+        |Gamma|, so it handles a sparse (gated) matrix by design. Always solved
+        exactly on the host. Default False.
+    coherence_floor : float, optional
+        Drop entries beyond `keep_lag` whose sample coherence is below this;
+        see `dolphin.phase_link._gate.floor_threshold`. Default 0 (none).
+    consistency_gate : str, optional
+        "none", "entry", "lag" or "chain"; see `dolphin.phase_link._gate`.
+    consistency_k : float, optional
+        Consistency threshold in units of the Cramer-Rao noise. Default 3.
+    keep_lag : int, optional
+        Lags up to this value are never dropped by the gate. Default 1.
 
     Returns
     -------
@@ -220,6 +247,11 @@ def run_phase_linking(
         first_real_slc_idx=first_real_slc_idx,
         compute_crlb=compute_crlb,
         eigen_solver=eigen_solver,
+        use_weighted_evd=use_weighted_evd,
+        coherence_floor=coherence_floor,
+        consistency_gate=consistency_gate,
+        consistency_k=consistency_k,
+        keep_lag=keep_lag,
     )
 
     # Get the smaller, looked versions of the masks
@@ -280,6 +312,11 @@ def run_cpl(
     first_real_slc_idx: int = 0,
     compute_crlb: bool = True,
     eigen_solver: str = "iterative",
+    use_weighted_evd: bool = False,
+    coherence_floor: float = 0.0,
+    consistency_gate: str = "none",
+    consistency_k: float = 3.0,
+    keep_lag: int = 1,
 ) -> PhaseLinkOutput:
     """Run the Combined Phase Linking (CPL) algorithm.
 
@@ -328,6 +365,22 @@ def run_cpl(
         separated leading eigenvalue; "exact" uses a full Hermitian
         eigendecomposition per pixel, needed when the coherence matrix is
         sparse (`baseline_lag`, or gated entries) and the eigenvalues cluster.
+    use_weighted_evd : bool, optional
+        Use the largest eigenvector of the phase matrix weighted entry-wise by
+        the Cramer-Rao inverse phase variance g^2 / (1 - g^2), zero weight on
+        zeroed entries, instead of EMI or EVD. Maximum-likelihood phase linking
+        under the independent-interferogram approximation; needs no inverse of
+        |Gamma|, so it handles a sparse (gated) matrix by design. Always solved
+        exactly on the host. Default False.
+    coherence_floor : float, optional
+        Drop entries beyond `keep_lag` whose sample coherence is below this;
+        see `dolphin.phase_link._gate.floor_threshold`. Default 0 (none).
+    consistency_gate : str, optional
+        "none", "entry", "lag" or "chain"; see `dolphin.phase_link._gate`.
+    consistency_k : float, optional
+        Consistency threshold in units of the Cramer-Rao noise. Default 3.
+    keep_lag : int, optional
+        Lags up to this value are never dropped by the gate. Default 1.
 
     Returns
     -------
@@ -366,6 +419,30 @@ def run_cpl(
     # rather than `num_looks = (2 * half_window[0] + 1) * (2 * half_window[1] + 1)`
     num_looks = math.sqrt(half_window[0] * half_window[1])
 
+    shp_counts = _shp_counts(neighbor_arrays, C_arrays.shape[:2])
+    gate_output = None
+    gated = coherence_floor > 0 or consistency_gate != "none"
+    if gated:
+        # The consistency noise uses the realised look count where SHPs were
+        # selected and the nominal window otherwise.
+        looks = (
+            shp_counts
+            if neighbor_arrays is not None
+            else jnp.full(
+                C_arrays.shape[:2],
+                (2 * half_window[0] + 1) * (2 * half_window[1] + 1),
+                dtype=jnp.float32,
+            )
+        )
+        C_arrays, gate_output = gate_coherence_matrices(
+            C_arrays,
+            looks,
+            floor=float(coherence_floor),
+            gate=consistency_gate,
+            k=float(consistency_k),
+            keep_lag=int(keep_lag),
+        )
+
     reference_idx = ns + reference_idx if reference_idx < 0 else reference_idx
     cpx_phase, eigenvalues, estimator, crlb_std_dev = process_coherence_matrices(
         C_arrays,
@@ -377,9 +454,14 @@ def run_cpl(
         first_real_slc_idx=first_real_slc_idx,
         compute_crlb=compute_crlb,
         eigen_solver=eigen_solver,
+        use_weighted_evd=use_weighted_evd,
     )
-    # Get the temporal coherence
-    temp_coh = metrics.estimate_temp_coh(cpx_phase, C_arrays)
+    # Get the temporal coherence; over the admitted entries only when gated,
+    # since a zeroed entry carries no phase to compare against.
+    if gated:
+        temp_coh = metrics.estimate_admitted_temp_coh(cpx_phase, C_arrays)
+    else:
+        temp_coh = metrics.estimate_temp_coh(cpx_phase, C_arrays)
 
     # An unsupported acquisition has a zero diagonal. Without this mask the
     # solver can return zero phase and unit temporal coherence for an empty window.
@@ -392,18 +474,6 @@ def run_cpl(
     cpx_phase_reshaped = jnp.moveaxis(cpx_phase, -1, 0)
     crlb_std_dev_reshaped = jnp.moveaxis(crlb_std_dev, -1, 0)
 
-    # Get the SHP counts for each pixel (if not using Rect window)
-    if neighbor_arrays is None:
-        shp_counts = jnp.zeros(temp_coh.shape, dtype=np.int16)
-    elif neighbor_arrays.dtype == np.bool_:
-        shp_counts = jnp.sum(neighbor_arrays, axis=(-2, -1))
-    else:
-        # For float weights (e.g. Gaussian), compute effective number of looks
-        # ENL = (sum(w))^2 / sum(w^2)  (Kish, 1965, Survey Sampling)
-        w_sum = jnp.sum(neighbor_arrays, axis=(-2, -1))
-        w_sq_sum = jnp.sum(neighbor_arrays**2, axis=(-2, -1))
-        shp_counts = jnp.round(w_sum**2 / w_sq_sum).astype(jnp.int16)
-
     return PhaseLinkOutput(
         cpx_phase=cpx_phase_reshaped,
         temp_coh=temp_coh,
@@ -412,7 +482,21 @@ def run_cpl(
         estimator=estimator,
         crlb_std_dev=crlb_std_dev_reshaped,
         closure_phases=closure_phases,
+        gate=gate_output,
     )
+
+
+def _shp_counts(neighbor_arrays, shape) -> Array:
+    """SHP count per pixel: neighbours for boolean SHP methods, ENL for weights."""
+    if neighbor_arrays is None:
+        return jnp.zeros(shape, dtype=np.int16)
+    if neighbor_arrays.dtype == np.bool_:
+        return jnp.sum(neighbor_arrays, axis=(-2, -1))
+    # For float weights (e.g. Gaussian), compute effective number of looks
+    # ENL = (sum(w))^2 / sum(w^2)  (Kish, 1965, Survey Sampling)
+    w_sum = jnp.sum(neighbor_arrays, axis=(-2, -1))
+    w_sq_sum = jnp.sum(neighbor_arrays**2, axis=(-2, -1))
+    return jnp.round(w_sum**2 / w_sq_sum).astype(jnp.int16)
 
 
 @partial(
@@ -425,6 +509,7 @@ def run_cpl(
         "first_real_slc_idx",
         "compute_crlb",
         "eigen_solver",
+        "use_weighted_evd",
     ),
 )
 def process_coherence_matrices(
@@ -437,6 +522,7 @@ def process_coherence_matrices(
     first_real_slc_idx: int = 0,
     compute_crlb: bool = True,
     eigen_solver: str = "iterative",
+    use_weighted_evd: bool = False,
 ) -> tuple[Array, Array, Array, Array]:
     """Estimate the linked phase for a stack of coherence matrices.
 
@@ -477,6 +563,13 @@ def process_coherence_matrices(
         separated leading eigenvalue; "exact" uses a full Hermitian
         eigendecomposition per pixel, needed when the coherence matrix is
         sparse (`baseline_lag`, or gated entries) and the eigenvalues cluster.
+    use_weighted_evd : bool, optional
+        Use the largest eigenvector of the phase matrix weighted entry-wise by
+        the Cramer-Rao inverse phase variance g^2 / (1 - g^2), zero weight on
+        zeroed entries, instead of EMI or EVD. Maximum-likelihood phase linking
+        under the independent-interferogram approximation; needs no inverse of
+        |Gamma|, so it handles a sparse (gated) matrix by design. Always solved
+        exactly on the host. Default False.
 
     Returns
     -------
@@ -502,8 +595,6 @@ def process_coherence_matrices(
         msg = f"eigen_solver must be 'iterative' or 'exact', got {eigen_solver!r}"
         raise ValueError(msg)
 
-    evd_eig_vals, evd_eig_vecs = largest_eig(C_arrays * jnp.abs(C_arrays))
-
     Gamma = jnp.abs(C_arrays)
 
     # Identity used for regularization and for solving
@@ -525,11 +616,41 @@ def process_coherence_matrices(
     # we should just fall back to EVD
     # Use the already- factored |Gamma|^-1, solving Ax = I gives the inverse
     Gamma_inv = cho_solve((cho, is_lower), Id)
-    if use_evd:
+    if use_weighted_evd:
+        # Largest eigenvector of the phase matrix weighted by the Cramer-Rao
+        # inverse phase variance of each entry, zero weight where an entry was
+        # zeroed by a gate. No inverse of |Gamma| is needed, so a sparse matrix
+        # is handled by design. Always solved on the host: the matrix is
+        # sparse by construction and single-precision JAX `eigh` loses the
+        # phase of its tiny eigenvector components (see `_eigenvalues`).
+        present = jnp.abs(C_arrays) > 0
+        g = jnp.clip(jnp.abs(C_arrays), 0.0, 0.99)
+        W = jnp.where(present, g**2 / (1 - g**2), 0.0)
+        W = jnp.where(Id > 0, 1.0, W)
+        phase = jnp.where(present, jnp.exp(1j * jnp.angle(C_arrays)), 0)
+        eig_vals, eig_vecs = eigh_largest_stack_exact(W * phase)
+        # Where the gate left only the nearest-neighbour band the graph is a
+        # tree, and the weighted eigenvector is exactly the chained phases. The
+        # eigensolver cannot deliver them there: the principal eigenvector of
+        # a chain decays geometrically, below the solver's relative accuracy
+        # at the far end over a 15-date stack, so use the closed form.
+        lag = jnp.abs(jnp.arange(n)[:, None] - jnp.arange(n)[None, :])
+        chain_only = jnp.all(jnp.where(lag > 1, ~present, True), axis=(-2, -1))
+        band = jnp.stack(
+            [jnp.angle(C_arrays[..., i, i + 1]) for i in range(n - 1)], axis=-1
+        )
+        chain_phase = jnp.concatenate(
+            [jnp.zeros_like(band[..., :1]), jnp.cumsum(band, axis=-1)], axis=-1
+        )
+        chain_vecs = jnp.exp(-1j * chain_phase).astype(eig_vecs.dtype)
+        eig_vecs = jnp.where(chain_only[..., None], chain_vecs, eig_vecs)
+        estimator = jnp.full(eig_vals.shape, EstimatorType.WEVD, dtype=jnp.int8)
+    elif use_evd:
         # EVD
-        eig_vals, eig_vecs = evd_eig_vals, evd_eig_vecs
-        estimator = jnp.zeros(eig_vals.shape, dtype=bool)
+        eig_vals, eig_vecs = largest_eig(C_arrays * jnp.abs(C_arrays))
+        estimator = jnp.zeros(eig_vals.shape, dtype=jnp.int8)
     else:
+        evd_eig_vals, evd_eig_vecs = largest_eig(C_arrays * jnp.abs(C_arrays))
         # EMI
         # estimate the wrapped phase based on the EMI paper
         # *smallest* eigenvalue decomposition of the (|Gamma|^-1  *  C) matrix

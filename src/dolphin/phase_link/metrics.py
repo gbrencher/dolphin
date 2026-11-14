@@ -64,6 +64,30 @@ def estimate_temp_coh_single(cpx_phase: ArrayLike, C: ArrayLike) -> Array:
 
 
 @jit
+def estimate_admitted_temp_coh(cpx_phase: ArrayLike, C_arrays: ArrayLike) -> Array:
+    """Temporal coherence over the nonzero entries of each coherence matrix.
+
+    The counterpart of `estimate_temp_coh` for matrices whose entries were
+    zeroed by a gate or by `baseline_lag`: a zeroed entry has no phase to
+    compare against, so it is given zero weight rather than counted as a
+    residual of the solution's own phase.
+    """
+    if cpx_phase.ndim == 1:
+        cpx_phase = cpx_phase.reshape(1, 1, -1)
+    if C_arrays.ndim == 2:
+        C_arrays = C_arrays.reshape(1, 1, *C_arrays.shape)
+    _temp_coh_3d = vmap(estimate_admitted_temp_coh_single)
+    return vmap(_temp_coh_3d)(cpx_phase, C_arrays)
+
+
+@jit
+def estimate_admitted_temp_coh_single(cpx_phase: ArrayLike, C: ArrayLike) -> Array:
+    """Temporal coherence for one pixel over the nonzero entries of `C`."""
+    W = (jnp.abs(C) > 0).astype("float32")
+    return _general_temp_coh_single(cpx_phase=cpx_phase, C=C, W=W)
+
+
+@jit
 def estimate_weighted_temp_coh_single(cpx_phase: ArrayLike, C: ArrayLike) -> Array:
     """Estimate the weighted temporal coherence for one pixel."""
     # Weight the differences by pass in weights coherence magnitudes
