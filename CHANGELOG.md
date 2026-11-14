@@ -7,6 +7,10 @@
 - Per-pixel gating of the coherence matrix (`dolphin.phase_link._gate`): a coherence floor set by false-admission probability (`phase_linking.coherence_floor_false_admission`) and a consistency gate on entries beyond `keep_lag` against the chained nearest-neighbour phases (`consistency_gate`: `entry`, `lag` or `chain`; `consistency_k`). The `lag` gate gives each pixel its own temporal bandwidth, written as `max_consistent_lag` with `admitted_fraction`, `inconsistent_admitted` and `admitted_bias` when `write_consistency` is set. Temporal coherence of a gated solution is computed over the admitted entries only.
 - `phase_linking.use_weighted_evd`: the largest eigenvector of the phase matrix weighted entry-wise by the Cramer-Rao inverse phase variance, the maximum-likelihood phase linking under the independent-interferogram approximation. It needs no inverse of |Gamma|, so it is the estimator for a gated matrix; EMI on a holed matrix distorts its inverse-coherence weighting and the EVD fallback is unweighted. Estimator code 2 in the `estimator` raster.
 
+### Fixed
+- `run_phase_linking` dropped the gate layers that `run_cpl` returned, so `write_consistency` raised in the workflow at the first block. The layers are passed through.
+- The gate layers were eroded at block edges by their own NaNs, and `inconsistent_admitted` and `admitted_bias` are NaN by definition wherever no long entry is admitted, which would have erased valid pixels within two pixels of each such pixel. They now take the footprint of temporal coherence.
+
 ## [0.42.0](https://github.com/isce-framework/dolphin/compare/v0.41.0...v0.42.0) - 2025-08-19
 
 ### Added
