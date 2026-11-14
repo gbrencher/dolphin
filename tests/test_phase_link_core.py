@@ -22,9 +22,10 @@ def slc_samples(C_truth):
     return simulate.simulate_neighborhood_stack(C, ns)
 
 
+@pytest.mark.parametrize("eigen_solver", ["iterative", "exact"])
 @pytest.mark.parametrize("baseline_lag", [None, 5])
 @pytest.mark.parametrize("use_evd", [False, True])
-def test_estimation(C_truth, slc_samples, use_evd, baseline_lag):
+def test_estimation(C_truth, slc_samples, use_evd, baseline_lag, eigen_solver):
     _, truth = C_truth
 
     C_hat = np.array(covariance.coh_mat_single(slc_samples))
@@ -46,6 +47,7 @@ def test_estimation(C_truth, slc_samples, use_evd, baseline_lag):
         Strides(x=1, y=1),
         use_evd=use_evd,
         baseline_lag=baseline_lag,
+        eigen_solver=eigen_solver,
     )
     assert pl_out.cpx_phase.shape == (len(est_mle_verify), 11, 11)
     assert pl_out.temp_coh.shape == (11, 11)
@@ -314,3 +316,11 @@ def test_run_phase_linking_gaussian_vs_rect(C_truth):
         pl_out_gaussian.temp_coh[5, 5],
         atol=0.1,
     )
+
+
+def test_eigen_solver_rejects_unknown(slc_samples):
+    slc_stack = slc_samples.reshape(NUM_ACQ, 11, 11)
+    with pytest.raises(ValueError, match="eigen_solver"):
+        _core.run_cpl(
+            slc_stack, HalfWindow(x=5, y=5), Strides(x=1, y=1), eigen_solver="fast"
+        )

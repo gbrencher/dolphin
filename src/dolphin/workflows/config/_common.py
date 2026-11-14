@@ -107,6 +107,17 @@ class PhaseLinkingOptions(BaseModel, extra="forbid"):
     ] = Field(
         False, description="Use EVD on the coherence instead of using the EMI algorithm"
     )
+    eigen_solver: Literal["iterative", "exact"] = Field(
+        "iterative",
+        description=(
+            "How the EVD/EMI eigenvectors are found. 'iterative' (power iteration and"
+            " shifted inverse iteration) is fast and assumes a well separated leading"
+            " eigenvalue, as a dense coherence matrix has. 'exact' performs a full"
+            " eigendecomposition per pixel and is required when the coherence matrix"
+            " is sparse (`baseline_lag`, gated entries), where the iterations do not"
+            " converge within their budget."
+        ),
+    )
 
     beta: float = Field(
         0.00,

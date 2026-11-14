@@ -14,6 +14,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array, jit, vmap
 from jax.lax import while_loop
 from jax.typing import ArrayLike
@@ -88,6 +89,107 @@ def eigh_largest_stack(C_arrays: ArrayLike) -> tuple[Array, Array]:
     """
     eig_vals, eig_vecs = vmap(vmap(power_iteration))(C_arrays)
     return eig_vals.real, eig_vecs
+
+
+def _eigh_host(C_arrays: ArrayLike) -> tuple[Array, Array]:
+    """Full Hermitian eigendecomposition per pixel, computed by NumPy's LAPACK.
+
+    `jnp.linalg.eigh` in single precision returns valid eigenvectors (residuals
+    near 1e-7) but loses the *phase* of eigenvector components whose magnitude
+    is near or below single-precision resolution. On a chain-only coherence
+    matrix the principal eigenvector decays across every weak 12-day link, so
+    such components are the rule: the median smallest component over a crop was
+    1.7e-7 and a tenth of pixels were below 1e-10. With JAX `eigh` a fifth of
+    the pixels then departed from the chained phases by more than 0.01 rad;
+    with NumPy's `eigh` on the same complex64 input, which keeps relative
+    accuracy on the reduced tridiagonal form, 0.05%, the same as double
+    precision. Dolphin runs JAX in single precision throughout, so the exact
+    solve goes to the host rather than enabling x64 globally. Eigenvalues are
+    returned in ascending order, as both libraries do.
+    """
+    out_types = (
+        jax.ShapeDtypeStruct(C_arrays.shape[:-1], jnp.float32),
+        jax.ShapeDtypeStruct(C_arrays.shape, C_arrays.dtype),
+    )
+
+    def _numpy_eigh(x):
+        # `jnp.linalg.eigh` returns NaN for a non-finite matrix and the callers
+        # rely on that (EMI falls back to EVD where inverting |Gamma| failed);
+        # NumPy raises instead, so solve the finite pixels and NaN the rest.
+        x = np.asarray(x)
+        n = x.shape[-1]
+        finite = np.isfinite(x).all(axis=(-2, -1))
+        safe = np.where(finite[..., None, None], x, np.eye(n, dtype=x.dtype))
+        try:
+            w, v = np.linalg.eigh(safe)
+        except np.linalg.LinAlgError:
+            # Rare: solve pixel by pixel so one failure does not void the block.
+            w = np.empty(safe.shape[:-1], dtype=np.float32)
+            v = np.empty(safe.shape, dtype=x.dtype)
+            for idx in np.ndindex(safe.shape[:-2]):
+                try:
+                    w[idx], v[idx] = np.linalg.eigh(safe[idx])
+                except np.linalg.LinAlgError:
+                    w[idx], v[idx] = np.nan, np.nan
+        w = np.where(finite[..., None], w, np.nan).astype(np.float32)
+        v = np.where(finite[..., None, None], v, np.nan).astype(x.dtype)
+        return w, v
+
+    return jax.pure_callback(_numpy_eigh, out_types, C_arrays)
+
+
+@jit
+def eigh_largest_stack_exact(C_arrays: ArrayLike) -> tuple[Array, Array]:
+    """Get the largest (eigenvalue, eigenvector) per pixel by full eigendecomposition.
+
+    The iterative solvers above assume a well separated leading eigenvalue, which
+    holds for a dense coherence matrix. For a sparse matrix (`baseline_lag`, or
+    entries zeroed by a gate) the top eigenvalues cluster, 50 power iterations
+    leave several percent of the second eigenvector in the answer, and the
+    chain-only case that should reproduce the nearest-neighbour phases exactly
+    does not. This solves every pixel exactly, on the host (see `_eigh_host` for
+    why not `jnp.linalg.eigh`), at the cost shown in the table at the top of
+    this module.
+
+    Parameters
+    ----------
+    C_arrays : ArrayLike
+        The stack of Hermitian matrices, shape = (rows, cols, nslc, nslc)
+
+    Returns
+    -------
+    eigenvalues : Array
+        The largest eigenvalue for each pixel's matrix, shape = (rows, cols)
+    eigenvectors : Array
+        The corresponding normalized eigenvector, shape = (rows, cols, nslc)
+
+    """
+    eig_vals, eig_vecs = _eigh_host(C_arrays)
+    return eig_vals[..., -1], eig_vecs[..., :, -1]
+
+
+@jit
+def eigh_smallest_stack_exact(C_arrays: ArrayLike) -> tuple[Array, Array]:
+    """Get the smallest (eigenvalue, eigenvector) per pixel by full eigendecomposition.
+
+    The exact counterpart of `eigh_smallest_stack`; see `eigh_largest_stack_exact`
+    for when it is needed and `_eigh_host` for how it is solved.
+
+    Parameters
+    ----------
+    C_arrays : ArrayLike
+        The stack of Hermitian matrices, shape = (rows, cols, nslc, nslc)
+
+    Returns
+    -------
+    eigenvalues : Array
+        The smallest eigenvalue for each pixel's matrix, shape = (rows, cols)
+    eigenvectors : Array
+        The corresponding normalized eigenvector, shape = (rows, cols, nslc)
+
+    """
+    eig_vals, eig_vecs = _eigh_host(C_arrays)
+    return eig_vals[..., 0], eig_vecs[..., :, 0]
 
 
 @partial(jit, static_argnames=("tol",))

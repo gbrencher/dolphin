@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (HMA fork, github.com/gbrencher/dolphin)
+
+### Added
+- `phase_linking.eigen_solver`: `"exact"` solves the EVD and EMI eigenvectors by full Hermitian eigendecomposition per pixel (`eigh_largest_stack_exact`, `eigh_smallest_stack_exact`). The default `"iterative"` keeps power iteration and shifted inverse iteration, which do not converge in their 50-iteration budget on a sparse coherence matrix (`baseline_lag`, gated entries): on a chain-only matrix the solution that must reproduce the nearest-neighbour phases exactly came out with a resultant of 0.98 against them. Tests document the non-convergence. The exact solve runs on the host through NumPy's LAPACK (`jax.pure_callback`): single-precision `jnp.linalg.eigh` returns valid eigenvectors but loses the phase of components near or below single-precision magnitude, which a chain-only coherence matrix produces at most pixels; NumPy's `eigh` on the same complex64 input keeps them, matching double precision.
+
 ## [0.42.0](https://github.com/isce-framework/dolphin/compare/v0.41.0...v0.42.0) - 2025-08-19
 
 ### Added

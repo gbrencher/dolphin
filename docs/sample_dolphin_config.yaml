@@ -140,6 +140,9 @@ phase_linking:
   # Use EVD on the coherence instead of using the EMI algorithm.
   #   Type: boolean.
   use_evd: false
+  #   How the EVD/EMI eigenvectors are found: iterative (default) or exact.
+  #   Type: string.
+  eigen_solver: iterative
   # Beta regularization parameter for correlation matrix inversion. 0 is no regularization.
   #   Type: number.
   beta: 0.0

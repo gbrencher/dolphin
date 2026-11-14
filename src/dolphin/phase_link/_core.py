@@ -17,7 +17,12 @@ from dolphin.utils import take_looks
 
 from . import covariance, crlb, metrics
 from ._closure_phase import compute_nearest_closure_phases_batch
-from ._eigenvalues import eigh_largest_stack, eigh_smallest_stack
+from ._eigenvalues import (
+    eigh_largest_stack,
+    eigh_largest_stack_exact,
+    eigh_smallest_stack,
+    eigh_smallest_stack_exact,
+)
 from ._ps_filling import fill_ps_pixels
 
 logger = logging.getLogger("dolphin")
@@ -87,6 +92,7 @@ def run_phase_linking(
     baseline_lag: Optional[int] = None,
     first_real_slc_idx: int = 0,
     compute_crlb: bool = True,
+    eigen_solver: str = "iterative",
 ) -> PhaseLinkOutput:
     """Estimate the linked phase for a stack of SLCs.
 
@@ -150,6 +156,12 @@ def run_phase_linking(
         By default 0.
     compute_crlb : bool, optional
         Whether to compute the CRLB, by default True
+    eigen_solver : str, optional
+        How the EVD and EMI eigenvectors are found: "iterative" (default) uses
+        power iteration and shifted inverse iteration, which assume a well
+        separated leading eigenvalue; "exact" uses a full Hermitian
+        eigendecomposition per pixel, needed when the coherence matrix is
+        sparse (`baseline_lag`, or gated entries) and the eigenvalues cluster.
 
     Returns
     -------
@@ -207,6 +219,7 @@ def run_phase_linking(
         baseline_lag=baseline_lag,
         first_real_slc_idx=first_real_slc_idx,
         compute_crlb=compute_crlb,
+        eigen_solver=eigen_solver,
     )
 
     # Get the smaller, looked versions of the masks
@@ -266,6 +279,7 @@ def run_cpl(
     baseline_lag: Optional[int] = None,
     first_real_slc_idx: int = 0,
     compute_crlb: bool = True,
+    eigen_solver: str = "iterative",
 ) -> PhaseLinkOutput:
     """Run the Combined Phase Linking (CPL) algorithm.
 
@@ -308,6 +322,12 @@ def run_cpl(
         By default 0.
     compute_crlb : bool, optional
         Whether to compute the CRLB, by default True
+    eigen_solver : str, optional
+        How the EVD and EMI eigenvectors are found: "iterative" (default) uses
+        power iteration and shifted inverse iteration, which assume a well
+        separated leading eigenvalue; "exact" uses a full Hermitian
+        eigendecomposition per pixel, needed when the coherence matrix is
+        sparse (`baseline_lag`, or gated entries) and the eigenvalues cluster.
 
     Returns
     -------
@@ -356,6 +376,7 @@ def run_cpl(
         num_looks=num_looks,
         first_real_slc_idx=first_real_slc_idx,
         compute_crlb=compute_crlb,
+        eigen_solver=eigen_solver,
     )
     # Get the temporal coherence
     temp_coh = metrics.estimate_temp_coh(cpx_phase, C_arrays)
@@ -403,6 +424,7 @@ def run_cpl(
         "num_looks",
         "first_real_slc_idx",
         "compute_crlb",
+        "eigen_solver",
     ),
 )
 def process_coherence_matrices(
@@ -414,6 +436,7 @@ def process_coherence_matrices(
     num_looks: int = 1,
     first_real_slc_idx: int = 0,
     compute_crlb: bool = True,
+    eigen_solver: str = "iterative",
 ) -> tuple[Array, Array, Array, Array]:
     """Estimate the linked phase for a stack of coherence matrices.
 
@@ -448,6 +471,12 @@ def process_coherence_matrices(
     compute_crlb : bool, optional
         Whether to compute the CRLB
         Default is True.
+    eigen_solver : str, optional
+        How the EVD and EMI eigenvectors are found: "iterative" (default) uses
+        power iteration and shifted inverse iteration, which assume a well
+        separated leading eigenvalue; "exact" uses a full Hermitian
+        eigendecomposition per pixel, needed when the coherence matrix is
+        sparse (`baseline_lag`, or gated entries) and the eigenvalues cluster.
 
     Returns
     -------
@@ -465,7 +494,15 @@ def process_coherence_matrices(
     """
     rows, cols, n, _ = C_arrays.shape
 
-    evd_eig_vals, evd_eig_vecs = eigh_largest_stack(C_arrays * jnp.abs(C_arrays))
+    if eigen_solver == "exact":
+        largest_eig, smallest_eig = eigh_largest_stack_exact, eigh_smallest_stack_exact
+    elif eigen_solver == "iterative":
+        largest_eig, smallest_eig = eigh_largest_stack, eigh_smallest_stack
+    else:
+        msg = f"eigen_solver must be 'iterative' or 'exact', got {eigen_solver!r}"
+        raise ValueError(msg)
+
+    evd_eig_vals, evd_eig_vecs = largest_eig(C_arrays * jnp.abs(C_arrays))
 
     Gamma = jnp.abs(C_arrays)
 
@@ -499,7 +536,10 @@ def process_coherence_matrices(
         # We're looking for the lambda nearest to 1. So shift by 0.99
         # Also, use the evd vectors as iteration starting point:
         mu = 0.99
-        emi_eig_vals, emi_eig_vecs = eigh_smallest_stack(Gamma_inv * C_arrays, mu)
+        if eigen_solver == "exact":
+            emi_eig_vals, emi_eig_vecs = smallest_eig(Gamma_inv * C_arrays)
+        else:
+            emi_eig_vals, emi_eig_vecs = smallest_eig(Gamma_inv * C_arrays, mu)
         # From the EMI paper, normalize the eigenvectors to have norm sqrt(n)
         emi_eig_vecs = (
             jnp.sqrt(n)

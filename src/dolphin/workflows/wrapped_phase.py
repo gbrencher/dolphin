@@ -242,6 +242,7 @@ def run(
             half_window=cfg.phase_linking.half_window.model_dump(),
             strides=strides_dict,
             use_evd=cfg.phase_linking.use_evd,
+            eigen_solver=cfg.phase_linking.eigen_solver,
             beta=cfg.phase_linking.beta,
             zero_correlation_threshold=cfg.phase_linking.zero_correlation_threshold,
             mask_file=mask_filename,
