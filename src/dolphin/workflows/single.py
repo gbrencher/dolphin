@@ -20,6 +20,7 @@ from dolphin._decorators import atomic_output
 from dolphin._types import Filename, HalfWindow, Strides
 from dolphin.io import BlockIndices, EagerLoader, StridedBlockManager, VRTStack
 from dolphin.phase_link import PhaseLinkRuntimeError, compress, run_phase_linking
+from dolphin.phase_link._gate import floor_threshold
 from dolphin.ps import calc_ps_block
 from dolphin.stack import MiniStackInfo
 from dolphin.utils import DummyProcessPoolExecutor, grow_nodata_region
@@ -52,6 +53,12 @@ def run_wrapped_phase_single(
     zero_correlation_threshold: float = 0.0,
     use_evd: bool = False,
     eigen_solver: str = "iterative",
+    use_weighted_evd: bool = False,
+    coherence_floor_false_admission: Optional[float] = None,
+    consistency_gate: str = "none",
+    consistency_k: float = 3.0,
+    keep_lag: int = 1,
+    write_consistency: bool = False,
     mask_file: Optional[Filename] = None,
     ps_mask_file: Optional[Filename] = None,
     amp_mean_file: Optional[Filename] = None,
@@ -95,6 +102,17 @@ def run_wrapped_phase_single(
     amp_mean, amp_variance = _get_amp_mean_variance(amp_mean_file, amp_dispersion_file)
 
     xhalf, yhalf = half_window["x"], half_window["y"]
+    # The coherence floor is set per window by false-admission probability at
+    # the nominal look count, so the same setting transfers across windows.
+    coherence_floor = 0.0
+    if coherence_floor_false_admission:
+        coherence_floor = floor_threshold(
+            coherence_floor_false_admission, (2 * yhalf + 1) * (2 * xhalf + 1)
+        )
+        logger.info(
+            f"Coherence floor {coherence_floor:.3f} at false admission"
+            f" {coherence_floor_false_admission:g}"
+        )
 
     # If we were passed any compressed SLCs in `input_slc_files`,
     # then we want that index for when we create new compressed SLCs.
@@ -173,6 +191,18 @@ def run_wrapped_phase_single(
             nodata=255,
         ),
     }
+    if write_consistency:
+        # Per-pixel layers from the coherence-matrix gate; NaN nodata, since 0
+        # is a valid value for every one of them.
+        for key in (
+            "max_consistent_lag",
+            "admitted_fraction",
+            "inconsistent_admitted",
+            "admitted_bias",
+        ):
+            output_files[key] = OutputFile(
+                output_folder / f"{key}_{start_end}.tif", np.float32, strides, nodata=np.nan
+            )
 
     for op in output_files.values():
         io.write_arr(
@@ -253,6 +283,11 @@ def run_wrapped_phase_single(
                 strides=strides_tup,
                 use_evd=use_evd,
                 eigen_solver=eigen_solver,
+                use_weighted_evd=use_weighted_evd,
+                coherence_floor=coherence_floor,
+                consistency_gate=consistency_gate,
+                consistency_k=consistency_k,
+                keep_lag=keep_lag,
                 beta=beta,
                 zero_correlation_threshold=zero_correlation_threshold,
                 reference_idx=ministack.output_reference_idx,
@@ -354,6 +389,13 @@ def run_wrapped_phase_single(
                 "eigenvalues": pl_output.eigenvalues,
                 "estimator": pl_output.estimator,
             }
+            if write_consistency:
+                if pl_output.gate is None:
+                    msg = "write_consistency requires a coherence floor or consistency gate"
+                    raise ValueError(msg)
+                out_datas.update(
+                    {k: np.asarray(v) for k, v in pl_output.gate._asdict().items()}
+                )
             for key, data in out_datas.items():
                 output_file = output_files[key]
                 trimmed_data = data[out_trim_rows, out_trim_cols]

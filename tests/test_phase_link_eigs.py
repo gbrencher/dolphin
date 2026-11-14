@@ -157,9 +157,13 @@ def test_chain_with_weak_links_keeps_tiny_component_phases():
     must keep them; `jnp.linalg.eigh` in single precision does not.
     """
     stack, truth = weak_link_stack()
+    # The components are tiny in exact arithmetic (below 1e-9 here) ...
+    v_np = np.linalg.eigh((stack * np.abs(stack)).astype(np.complex128))[1][..., :, -1]
+    assert np.abs(v_np).min() < 1e-6
+    # ... and the host solver returns them at unit magnitude with their phases kept.
     _, evecs = eigh_largest_stack_exact(stack * np.abs(stack))
     evecs = np.asarray(evecs)
-    assert np.abs(evecs).min() < 1e-6
+    npt.assert_allclose(np.abs(evecs), 1.0, rtol=1e-6)
     assert np.all(chain_agreement(evecs, truth)[0] > 1 - 1e-4)
 
 

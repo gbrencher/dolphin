@@ -104,8 +104,12 @@ def _eigh_host(C_arrays: ArrayLike) -> tuple[Array, Array]:
     with NumPy's `eigh` on the same complex64 input, which keeps relative
     accuracy on the reduced tridiagonal form, 0.05%, the same as double
     precision. Dolphin runs JAX in single precision throughout, so the exact
-    solve goes to the host rather than enabling x64 globally. Eigenvalues are
-    returned in ascending order, as both libraries do.
+    solve goes to the host rather than enabling x64 globally, in double
+    precision, and the eigenvectors come back with unit-magnitude components:
+    on a chain-like matrix the principal eigenvector decays geometrically,
+    far below single precision over a 15-date stack with Cramer-Rao weights,
+    and only the phases of its components are used downstream. Eigenvalues
+    are returned in ascending order, as both libraries do.
     """
     out_types = (
         jax.ShapeDtypeStruct(C_arrays.shape[:-1], jnp.float32),
@@ -119,7 +123,15 @@ def _eigh_host(C_arrays: ArrayLike) -> tuple[Array, Array]:
         x = np.asarray(x)
         n = x.shape[-1]
         finite = np.isfinite(x).all(axis=(-2, -1))
-        safe = np.where(finite[..., None, None], x, np.eye(n, dtype=x.dtype))
+        # Solve in double precision. On a chain-like matrix (gated, or with
+        # weak links) the principal eigenvector decays geometrically along the
+        # chain, to 1e-17 of its largest component over a 15-date stack with
+        # Cramer-Rao weights, and the phases of those components are exact in
+        # theory but lost in single precision. Double keeps them down to 1e-300;
+        # the cast back to the input precision keeps any component above 1e-38.
+        safe = np.where(
+            finite[..., None, None], x, np.eye(n, dtype=x.dtype)
+        ).astype(np.result_type(x.dtype, np.complex128))
         try:
             w, v = np.linalg.eigh(safe)
         except np.linalg.LinAlgError:
@@ -131,6 +143,11 @@ def _eigh_host(C_arrays: ArrayLike) -> tuple[Array, Array]:
                     w[idx], v[idx] = np.linalg.eigh(safe[idx])
                 except np.linalg.LinAlgError:
                     w[idx], v[idx] = np.nan, np.nan
+        # Return unit-magnitude components: only their phases are used, and a
+        # component that is tiny in double would underflow to zero, phase lost,
+        # when cast back to single precision.
+        mag = np.abs(v)
+        v = np.where(mag > 0, v / np.where(mag > 0, mag, 1), 0)
         w = np.where(finite[..., None], w, np.nan).astype(np.float32)
         v = np.where(finite[..., None, None], v, np.nan).astype(x.dtype)
         return w, v
