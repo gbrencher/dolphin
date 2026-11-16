@@ -1,3 +1,4 @@
+from pathlib import Path
 import itertools
 from datetime import datetime, timedelta
 
@@ -239,6 +240,57 @@ class TestInvert:
 
         residuals = io.RasterStackReader.from_file_list(out_residuals)[:, :, :]
         npt.assert_allclose(residuals, 0, atol=1e-4)
+
+    def test_invert_unw_network_ifg_residuals(self, data, unw_files, tmp_path):
+        """One pair with a cycle error at one pixel carries the residual alone."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        n_ifgs = len(unw_files)
+        bad_idx, row, col = n_ifgs // 2, 7, 11
+        arr = io.load_gdal(unw_files[bad_idx])
+        arr[row, col] += 2 * np.pi
+        io.write_arr(
+            arr=arr, output_name=unw_files[bad_idx], like_filename=unw_files[bad_idx]
+        )
+        timeseries.invert_unw_network(
+            unw_file_list=unw_files,
+            reference=(0, 0),
+            output_dir=output_dir,
+            method="L1",
+            num_threads=1,
+            write_ifg_residuals=True,
+        )
+        res_dir = output_dir / "ifg_residuals"
+        res_files = sorted(res_dir.glob("*.res.tif"))
+        assert len(res_files) == n_ifgs
+        residuals = np.stack([io.load_gdal(f) for f in res_files])
+        names = [f.name for f in res_files]
+        bad_name = Path(unw_files[bad_idx]).name.replace(".tif", ".res.tif")
+        k = names.index(bad_name)
+        # Signed: unwrapped minus predicted, so the added cycle shows as +2 pi.
+        npt.assert_allclose(residuals[k, row, col], 2 * np.pi, atol=1e-3)
+        others = np.delete(residuals[:, row, col], k)
+        npt.assert_allclose(others, 0, atol=1e-3)
+        clean = np.ones(residuals.shape[1:], dtype=bool)
+        clean[row, col] = False
+        npt.assert_allclose(residuals[:, clean], 0, atol=1e-3)
+
+        flag_fraction = io.load_gdal(res_dir / "flag_fraction.tif")
+        npt.assert_allclose(flag_fraction[row, col], 1 / n_ifgs, rtol=1e-5)
+        assert (flag_fraction[clean] == 0).all()
+        abs_median = io.load_gdal(res_dir / "abs_median.tif")
+        npt.assert_allclose(abs_median, 0, atol=1e-3)
+
+    def test_invert_unw_network_no_ifg_residuals_by_default(
+        self, unw_files, tmp_path
+    ):
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        timeseries.invert_unw_network(
+            unw_file_list=unw_files, reference=(0, 0), output_dir=output_dir,
+            num_threads=1,
+        )
+        assert not (output_dir / "ifg_residuals").exists()
 
 
 class TestVelocity:

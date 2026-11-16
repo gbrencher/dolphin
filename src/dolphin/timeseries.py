@@ -60,6 +60,7 @@ def run(
     add_overviews: bool = True,
     extra_reference_date: datetime | None = None,
     file_date_fmt: str = "%Y%m%d",
+    write_ifg_residuals: bool = False,
 ) -> tuple[list[Path], list[Path] | None, ReferencePoint]:
     """Invert the unwrapped interferograms, estimate timeseries and phase velocity.
 
@@ -217,6 +218,7 @@ def run(
             method=method,
             bad_pixel_mask=bad_pixel_mask,
             file_date_fmt=file_date_fmt,
+            write_ifg_residuals=write_ifg_residuals,
         )
         if extra_reference_date is None:
             final_ts_paths = inverted_phase_paths
@@ -972,6 +974,7 @@ def invert_unw_network(
     block_shape: tuple[int, int] = (256, 256),
     num_threads: int = 4,
     file_date_fmt: str = "%Y%m%d",
+    write_ifg_residuals: bool = False,
 ) -> tuple[list[Path], list[Path]]:
     """Perform pixel-wise inversion of unwrapped network to get phase per date.
 
@@ -1022,6 +1025,18 @@ def invert_unw_network(
     file_date_fmt : str, optional
         The format string to use when parsing the dates from the file names.
         Default is "%Y%m%d".
+    write_ifg_residuals : bool, optional
+        Also write the inversion residual of every interferogram, and two
+        per-pixel summaries of them, under `output_dir / "ifg_residuals"`:
+
+        - `<date1>_<date2>.res.tif`: the referenced unwrapped phase minus the
+          phase the solution predicts for that pair, signed, in radians.
+        - `flag_fraction.tif`: the fraction of interferograms whose residual
+          exceeds half a cycle (pi radians) in magnitude.
+        - `abs_median.tif`: the median over interferograms of the absolute
+          residual, in radians.
+
+        Default is False.
 
     Returns
     -------
@@ -1061,6 +1076,18 @@ def invert_unw_network(
         return out_paths, out_residuals_paths
 
     summed_residuals_path = Path(output_dir) / "unw_inversion_residuals.tif"
+    ifg_residual_paths: list[Path] = []
+    if write_ifg_residuals:
+        ifg_residual_dir = Path(output_dir) / "ifg_residuals"
+        ifg_residual_dir.mkdir(parents=True, exist_ok=True)
+        ifg_residual_paths = [
+            ifg_residual_dir / f"{format_dates(ref, sec, fmt=file_date_fmt)}.res.tif"
+            for ref, sec in ifg_tuples
+        ]
+        ifg_residual_paths += [
+            ifg_residual_dir / "flag_fraction.tif",
+            ifg_residual_dir / "abs_median.tif",
+        ]
     logger.info(f"Inverting network using {method.upper()}-norm minimization")
 
     A = get_incidence_matrix(ifg_pairs=ifg_tuples, sar_idxs=sar_dates)
@@ -1164,15 +1191,25 @@ def invert_unw_network(
         )
         residual_sum = np.where(masked_pixels, np.nan, np.asarray(residual_sum))
 
-        return (
-            np.vstack([out_displacement, residuals_per_date, residual_sum[np.newaxis]]),
-            rows,
-            cols,
-        )
+        layers = [out_displacement, residuals_per_date, residual_sum[np.newaxis]]
+        if write_ifg_residuals:
+            # Signed residual of every interferogram: referenced unwrapped phase
+            # minus the phase the solution predicts for that pair, in radians.
+            predicted = np.tensordot(np.asarray(A), np.asarray(phases), axes=(1, 0))
+            ifg_residuals = (np.asarray(stack) - predicted).astype(np.float32)
+            magnitude = np.abs(ifg_residuals)
+            flag_fraction = (magnitude > np.pi).mean(axis=0, dtype=np.float32)
+            abs_median = np.median(magnitude, axis=0)
+            ifg_residuals[:, masked_pixels] = np.nan
+            flag_fraction[masked_pixels] = np.nan
+            abs_median[masked_pixels] = np.nan
+            layers += [ifg_residuals, flag_fraction[np.newaxis], abs_median[np.newaxis]]
+
+        return (np.vstack(layers), rows, cols)
 
     # Combined writer for all output files
     writer = io.BackgroundStackWriter(
-        [*out_paths, *out_residuals_paths, summed_residuals_path],
+        [*out_paths, *out_residuals_paths, summed_residuals_path, *ifg_residual_paths],
         like_filename=unw_file_list[0],
         # Using np.nan for the residuals, since it's not a valid phase
         nodata=np.nan,
@@ -1197,6 +1234,9 @@ def invert_unw_network(
     for p in out_residuals_paths:
         io.set_raster_units(p, "radians")
     io.set_raster_units(summed_residuals_path, "radians")
+    for p in ifg_residual_paths:
+        if p.name != "flag_fraction.tif":
+            io.set_raster_units(p, "radians")
 
     logger.info("Completed invert_unw_network")
     return out_paths, out_residuals_paths
