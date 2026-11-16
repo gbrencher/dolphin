@@ -278,8 +278,7 @@ class TestInvert:
         flag_fraction = io.load_gdal(res_dir / "flag_fraction.tif")
         npt.assert_allclose(flag_fraction[row, col], 1 / n_ifgs, rtol=1e-5)
         assert (flag_fraction[clean] == 0).all()
-        abs_median = io.load_gdal(res_dir / "abs_median.tif")
-        npt.assert_allclose(abs_median, 0, atol=1e-3)
+        assert not (res_dir / "abs_median.tif").exists()
 
     def test_invert_unw_network_no_ifg_residuals_by_default(
         self, unw_files, tmp_path

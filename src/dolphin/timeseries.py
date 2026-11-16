@@ -1026,15 +1026,13 @@ def invert_unw_network(
         The format string to use when parsing the dates from the file names.
         Default is "%Y%m%d".
     write_ifg_residuals : bool, optional
-        Also write the inversion residual of every interferogram, and two
-        per-pixel summaries of them, under `output_dir / "ifg_residuals"`:
+        Also write the inversion residual of every interferogram, and a
+        per-pixel summary of them, under `output_dir / "ifg_residuals"`:
 
         - `<date1>_<date2>.res.tif`: the referenced unwrapped phase minus the
           phase the solution predicts for that pair, signed, in radians.
         - `flag_fraction.tif`: the fraction of interferograms whose residual
           exceeds half a cycle (pi radians) in magnitude.
-        - `abs_median.tif`: the median over interferograms of the absolute
-          residual, in radians.
 
         Default is False.
 
@@ -1084,10 +1082,7 @@ def invert_unw_network(
             ifg_residual_dir / f"{format_dates(ref, sec, fmt=file_date_fmt)}.res.tif"
             for ref, sec in ifg_tuples
         ]
-        ifg_residual_paths += [
-            ifg_residual_dir / "flag_fraction.tif",
-            ifg_residual_dir / "abs_median.tif",
-        ]
+        ifg_residual_paths.append(ifg_residual_dir / "flag_fraction.tif")
     logger.info(f"Inverting network using {method.upper()}-norm minimization")
 
     A = get_incidence_matrix(ifg_pairs=ifg_tuples, sar_idxs=sar_dates)
@@ -1197,13 +1192,12 @@ def invert_unw_network(
             # minus the phase the solution predicts for that pair, in radians.
             predicted = np.tensordot(np.asarray(A), np.asarray(phases), axes=(1, 0))
             ifg_residuals = (np.asarray(stack) - predicted).astype(np.float32)
-            magnitude = np.abs(ifg_residuals)
-            flag_fraction = (magnitude > np.pi).mean(axis=0, dtype=np.float32)
-            abs_median = np.median(magnitude, axis=0)
+            flag_fraction = (np.abs(ifg_residuals) > np.pi).mean(
+                axis=0, dtype=np.float32
+            )
             ifg_residuals[:, masked_pixels] = np.nan
             flag_fraction[masked_pixels] = np.nan
-            abs_median[masked_pixels] = np.nan
-            layers += [ifg_residuals, flag_fraction[np.newaxis], abs_median[np.newaxis]]
+            layers += [ifg_residuals, flag_fraction[np.newaxis]]
 
         return (np.vstack(layers), rows, cols)
 
