@@ -303,9 +303,8 @@ class TimeseriesOptions(BaseModel, extra="forbid"):
             "Write the inversion residual of every unwrapped interferogram (signed,"
             " radians: referenced unwrapped phase minus the phase the solved time"
             " series predicts for the pair) under `timeseries/ifg_residuals`, with"
-            " two per-pixel summaries: `flag_fraction`, the fraction of"
-            " interferograms whose residual exceeds half a cycle, and `abs_median`,"
-            " the median absolute residual. A residual near a multiple of 2 pi"
+            " a per-pixel summary, `flag_fraction`: the fraction of interferograms"
+            " whose residual exceeds half a cycle. A residual near a multiple of 2 pi"
             " marks an unwrapping decision that the rest of the network contradicts."
         ),
     )

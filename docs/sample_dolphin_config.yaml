@@ -390,10 +390,9 @@ timeseries_options:
   run_velocity: true
   # Write the inversion residual of every unwrapped interferogram (signed, radians: referenced
   #   unwrapped phase minus the phase the solved time series predicts for the pair) under
-  #   `timeseries/ifg_residuals`, with two per-pixel summaries: `flag_fraction`, the fraction
-  #   of interferograms whose residual exceeds half a cycle, and `abs_median`, the median
-  #   absolute residual. A residual near a multiple of 2 pi marks an unwrapping decision that
-  #   the rest of the network contradicts.
+  #   `timeseries/ifg_residuals`, with a per-pixel summary, `flag_fraction`: the fraction of
+  #   interferograms whose residual exceeds half a cycle. A residual near a multiple of 2 pi
+  #   marks an unwrapping decision that the rest of the network contradicts.
   #   Type: boolean.
   write_ifg_residuals: false
   # If providing a mask file, whether to apply the mask to the timeseries. If True, the time
