@@ -58,6 +58,8 @@ def run_wrapped_phase_single(
     consistency_gate: str = "none",
     consistency_k: float = 3.0,
     keep_lag: int = 1,
+    gate_compressed_history: bool = False,
+    history_anchor_idx: int = 0,
     write_consistency: bool = False,
     mask_file: Optional[Filename] = None,
     ps_mask_file: Optional[Filename] = None,
@@ -118,6 +120,18 @@ def run_wrapped_phase_single(
     # then we want that index for when we create new compressed SLCs.
     # We skip the old compressed SLCs to create new ones
     first_real_slc_idx = ministack.first_real_slc_idx
+
+    gate_history = gate_compressed_history and first_real_slc_idx > 0
+    history_anchor = (
+        _check_history(ministack, first_real_slc_idx, history_anchor_idx)
+        if gate_history
+        else 0
+    )
+    if gate_history:
+        logger.info(
+            f"{first_real_slc_idx} compressed SLCs are gated history, anchored at"
+            f" real acquisition {history_anchor}"
+        )
 
     msg = (
         f"Processing {len(input_slc_files) - first_real_slc_idx} SLCs +"
@@ -200,6 +214,11 @@ def run_wrapped_phase_single(
             "inconsistent_admitted",
             "admitted_bias",
             "admitted_temporal_coherence",
+            "signed_bias_lag2",
+            "signed_bias_lag3",
+            "signed_bias_lag4",
+            "history_admitted",
+            "history_bias",
         ):
             output_files[key] = OutputFile(
                 output_folder / f"{key}_{start_end}.tif", np.float32, strides, nodata=np.nan
@@ -289,6 +308,8 @@ def run_wrapped_phase_single(
                 consistency_gate=consistency_gate,
                 consistency_k=consistency_k,
                 keep_lag=keep_lag,
+                gate_history=gate_history,
+                history_anchor=history_anchor,
                 beta=beta,
                 zero_correlation_threshold=zero_correlation_threshold,
                 reference_idx=ministack.output_reference_idx,
@@ -658,3 +679,26 @@ def setup_output_folder(
         output_files.append(output_path)
 
     return output_files
+
+
+def _check_history(
+    ministack: MiniStackInfo, first_real_slc_idx: int, anchor: int
+) -> int:
+    """Validate a stack whose compressed SLCs are gated history; return the anchor."""
+    if any(ministack.is_compressed[first_real_slc_idx:]) or not all(
+        ministack.is_compressed[:first_real_slc_idx]
+    ):
+        msg = "gate_compressed_history needs the compressed SLCs first in the stack"
+        raise ValueError(msg)
+    n_real = len(ministack.is_compressed) - first_real_slc_idx
+    if not 0 <= anchor < n_real:
+        msg = f"history_anchor_idx {anchor} is not one of {n_real} real acquisitions"
+        raise ValueError(msg)
+    if ministack.output_reference_idx < first_real_slc_idx:
+        msg = (
+            "gate_compressed_history needs output_reference_idx to be a real"
+            f" acquisition; got {ministack.output_reference_idx} with"
+            f" {first_real_slc_idx} compressed SLCs"
+        )
+        raise ValueError(msg)
+    return anchor

@@ -1,3 +1,4 @@
+import jax.numpy as jnp
 import numpy as np
 import numpy.testing as npt
 import pytest
@@ -179,3 +180,122 @@ def test_temporal_coherence_is_over_the_whole_matrix_when_gated():
     npt.assert_allclose(full, np.asarray(expected), atol=1e-5)
     plain = _core.run_cpl(samples, **kwargs)
     assert plain.gate is None
+
+
+# ----- compressed history under the gate -----
+
+
+def _stack_with_history(phases, anchor, history_offsets, coherence=0.6):
+    """Coherence matrices for real dates with `phases`, plus history images.
+
+    C[i, j] has phase phases[i] - phases[j]. Each history image stands at the
+    anchor date, with its phase against every real date shifted by its offset.
+    """
+    n_real, h = len(phases), len(history_offsets)
+    full = np.concatenate([np.full(h, phases[anchor]), phases])
+    C = coherence * np.exp(1j * (full[:, None] - full[None, :]))
+    for q, offset in enumerate(history_offsets):
+        C[q, h:] *= np.exp(1j * offset)
+        C[h:, q] *= np.exp(-1j * offset)
+    C[np.arange(n_real + h), np.arange(n_real + h)] = 1
+    return jnp.asarray(C[None, None].astype(np.complex64))
+
+
+def _gate_history(C, n_history, anchor, gate="lag", floor=0.0):
+    looks = jnp.full(C.shape[:2], 153.0)
+    return gate_coherence_matrices(
+        C, looks, floor=floor, gate=gate, k=3.0, n_history=n_history, anchor=anchor
+    )
+
+
+PHASES = np.array([0.0, 0.3, 0.5, 0.9, 1.4, 1.5, 1.9, 2.4])
+
+
+def test_consistent_history_is_admitted():
+    C = _stack_with_history(PHASES, anchor=2, history_offsets=[0.0])
+    gated, out = _gate_history(C, 1, 2)
+    assert float(out.history_admitted[0, 0]) == 1
+    assert abs(float(out.history_bias[0, 0])) < 1e-5
+    np.testing.assert_allclose(gated[0, 0, 0, 1:], C[0, 0, 0, 1:])
+
+
+def test_inconsistent_history_is_dropped_and_its_bias_reported():
+    C = _stack_with_history(PHASES, anchor=2, history_offsets=[1.0])
+    gated, out = _gate_history(C, 1, 2)
+    assert float(out.history_admitted[0, 0]) == 0
+    np.testing.assert_allclose(float(out.history_bias[0, 0]), 1.0, atol=1e-5)
+    assert np.all(np.asarray(gated[0, 0, 0, 1:]) == 0)
+    assert np.all(np.asarray(gated[0, 0, 1:, 0]) == 0)
+    assert gated[0, 0, 0, 0] == 1
+
+
+def test_history_does_not_change_the_gating_of_real_dates():
+    C = _stack_with_history(PHASES, anchor=2, history_offsets=[1.0, 0.0])
+    gated, out = _gate_history(C, 2, 2)
+    looks = jnp.full(C.shape[:2], 153.0)
+    real, real_out = gate_coherence_matrices(C[..., 2:, 2:], looks, gate="lag", k=3.0)
+    np.testing.assert_array_equal(np.asarray(gated[..., 2:, 2:]), np.asarray(real))
+    np.testing.assert_array_equal(
+        np.asarray(out.max_consistent_lag), np.asarray(real_out.max_consistent_lag)
+    )
+
+
+def test_history_is_admitted_from_the_newest_until_the_first_failure():
+    # Index 0 is the older image, index 1 the newer.
+    newer_bad = _stack_with_history(PHASES, anchor=0, history_offsets=[0.0, 1.0])
+    _, out = _gate_history(newer_bad, 2, 0)
+    assert float(out.history_admitted[0, 0]) == 0
+    older_bad = _stack_with_history(PHASES, anchor=0, history_offsets=[1.0, 0.0])
+    gated, out = _gate_history(older_bad, 2, 0)
+    assert float(out.history_admitted[0, 0]) == 1
+    assert np.all(np.asarray(gated[0, 0, 0, 2:]) == 0)
+    assert np.all(np.asarray(gated[0, 0, 1, 2:]) != 0)
+
+
+def test_entries_between_history_images_are_always_dropped():
+    C = _stack_with_history(PHASES, anchor=0, history_offsets=[0.0, 0.0])
+    gated, _ = _gate_history(C, 2, 0)
+    assert gated[0, 0, 0, 1] == 0 and gated[0, 0, 1, 0] == 0
+    assert gated[0, 0, 0, 0] == 1 and gated[0, 0, 1, 1] == 1
+
+
+def test_history_respects_the_floor_and_the_chain_gate():
+    weak = _stack_with_history(PHASES, anchor=2, history_offsets=[0.0], coherence=0.2)
+    _, out = _gate_history(weak, 1, 2, gate="none", floor=0.3)
+    assert float(out.history_admitted[0, 0]) == 0
+    C = _stack_with_history(PHASES, anchor=2, history_offsets=[0.0])
+    _, out = _gate_history(C, 1, 2, gate="chain")
+    assert float(out.history_admitted[0, 0]) == 0
+
+
+def test_anchor_must_be_a_real_date():
+    C = _stack_with_history(PHASES, anchor=2, history_offsets=[0.0])
+    with pytest.raises(ValueError, match="anchor"):
+        _gate_history(C, 1, len(PHASES))
+
+
+def test_signed_bias_is_the_mean_closure_of_a_lag():
+    C = np.array(_stack_with_history(PHASES, anchor=0, history_offsets=[]))
+    n = len(PHASES)
+    for i in range(n - 2):
+        C[0, 0, i, i + 2] *= np.exp(0.2j)
+        C[0, 0, i + 2, i] *= np.exp(-0.2j)
+    looks = jnp.full((1, 1), 153.0)
+    _, out = gate_coherence_matrices(jnp.asarray(C), looks, gate="lag", k=3.0)
+    np.testing.assert_allclose(float(out.signed_bias_lag2[0, 0]), 0.2, atol=1e-5)
+    np.testing.assert_allclose(float(out.signed_bias_lag3[0, 0]), 0.0, atol=1e-5)
+    assert float(out.history_admitted[0, 0]) == 0
+    assert np.isnan(float(out.history_bias[0, 0]))
+
+
+def test_gated_history_option_needs_the_gate_and_the_weighted_estimator():
+    from dolphin.workflows.config import PhaseLinkingOptions
+
+    with pytest.raises(ValueError, match="gate_compressed_history"):
+        PhaseLinkingOptions(gate_compressed_history=True)
+    with pytest.raises(ValueError, match="gate_compressed_history"):
+        PhaseLinkingOptions(gate_compressed_history=True, consistency_gate="lag")
+    options = PhaseLinkingOptions(
+        gate_compressed_history=True, consistency_gate="lag", use_weighted_evd=True
+    )
+    assert options.history_anchor_idx == 0

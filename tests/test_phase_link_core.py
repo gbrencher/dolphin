@@ -1,5 +1,6 @@
 import os
 
+import jax.numpy as jnp
 import numpy as np
 import numpy.testing as npt
 import pytest
@@ -324,3 +325,60 @@ def test_eigen_solver_rejects_unknown(slc_samples):
         _core.run_cpl(
             slc_stack, HalfWindow(x=5, y=5), Strides(x=1, y=1), eigen_solver="fast"
         )
+
+
+def _history_matrices(history_offset):
+    phases = np.array([0.0, 0.3, 0.5, 0.9, 1.4, 1.5, 1.9, 2.4])
+    full = np.concatenate([[phases[2]], phases])
+    C = 0.6 * np.exp(1j * (full[:, None] - full[None, :]))
+    C[0, 1:] *= np.exp(1j * history_offset)
+    C[1:, 0] *= np.exp(-1j * history_offset)
+    C[np.arange(9), np.arange(9)] = 1
+    return phases, jnp.asarray(C[None, None].astype(np.complex64))
+
+
+@pytest.mark.parametrize("history_offset", [0.0, 1.0])
+def test_gated_history_leaves_the_real_solution_referenced_to_a_real_date(
+    history_offset,
+):
+    """Admitted or dropped, a history image must not disturb a consistent stack."""
+    from dolphin.phase_link._core import process_coherence_matrices
+    from dolphin.phase_link._gate import gate_coherence_matrices
+
+    phases, C = _history_matrices(history_offset)
+    looks = jnp.full((1, 1), 153.0)
+    gated, out = gate_coherence_matrices(
+        C, looks, gate="lag", k=3.0, n_history=1, anchor=2
+    )
+    assert float(out.history_admitted[0, 0]) == (history_offset == 0.0)
+    estimate, *_ = process_coherence_matrices(
+        gated,
+        reference_idx=1,
+        first_real_slc_idx=1,
+        compute_crlb=False,
+        use_weighted_evd=True,
+        n_history=1,
+    )
+    got = np.angle(np.asarray(estimate[0, 0, 1:]) * np.exp(-1j * phases))
+    np.testing.assert_allclose(got, 0.0, atol=1e-4)
+
+
+def test_gated_history_with_only_the_band_uses_the_closed_form():
+    from dolphin.phase_link._core import process_coherence_matrices
+    from dolphin.phase_link._gate import gate_coherence_matrices
+
+    phases, C = _history_matrices(0.0)
+    looks = jnp.full((1, 1), 153.0)
+    gated, _ = gate_coherence_matrices(
+        C, looks, gate="chain", n_history=1, anchor=2
+    )
+    estimate, *_ = process_coherence_matrices(
+        gated,
+        reference_idx=1,
+        first_real_slc_idx=1,
+        compute_crlb=False,
+        use_weighted_evd=True,
+        n_history=1,
+    )
+    got = np.angle(np.asarray(estimate[0, 0, 1:]) * np.exp(-1j * phases))
+    np.testing.assert_allclose(got, 0.0, atol=1e-5)
