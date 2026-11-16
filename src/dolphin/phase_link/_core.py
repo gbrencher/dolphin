@@ -421,6 +421,9 @@ def run_cpl(
     num_looks = math.sqrt(half_window[0] * half_window[1])
 
     shp_counts = _shp_counts(neighbor_arrays, C_arrays.shape[:2])
+    # Kept for temporal coherence, which is measured against every entry
+    # whether or not a gate lets it into the solve.
+    C_full = C_arrays
     gate_output = None
     gated = coherence_floor > 0 or consistency_gate != "none"
     if gated:
@@ -457,12 +460,12 @@ def run_cpl(
         eigen_solver=eigen_solver,
         use_weighted_evd=use_weighted_evd,
     )
-    # Get the temporal coherence; over the admitted entries only when gated,
-    # since a zeroed entry carries no phase to compare against.
-    if gated:
-        temp_coh = metrics.estimate_admitted_temp_coh(cpx_phase, C_arrays)
-    else:
-        temp_coh = metrics.estimate_temp_coh(cpx_phase, C_arrays)
+    # Temporal coherence keeps its delivered meaning under a gate: how well the
+    # solution reproduces the phase of every entry of the coherence matrix.
+    # Measured over the admitted entries alone it is inflated wherever few are
+    # admitted and exactly 1 where only the nearest-neighbour band is, which
+    # are the least coherent pixels; that version is kept as a gate layer.
+    temp_coh = metrics.estimate_temp_coh(cpx_phase, C_full)
 
     # An unsupported acquisition has a zero diagonal. Without this mask the
     # solver can return zero phase and unit temporal coherence for an empty window.
@@ -470,6 +473,13 @@ def run_cpl(
     cpx_phase = jnp.where(no_support[..., None], jnp.nan, cpx_phase)
     crlb_std_dev = jnp.where(no_support[..., None], jnp.nan, crlb_std_dev)
     temp_coh = jnp.where(no_support, jnp.nan, temp_coh)
+    if gate_output is not None:
+        admitted_temp_coh = metrics.estimate_admitted_temp_coh(cpx_phase, C_arrays)
+        gate_output = gate_output._replace(
+            admitted_temporal_coherence=jnp.where(
+                no_support, jnp.nan, admitted_temp_coh
+            ).astype(jnp.float32)
+        )
 
     # Reshape the (rows, cols, nslcs) output to be same as input stack
     cpx_phase_reshaped = jnp.moveaxis(cpx_phase, -1, 0)

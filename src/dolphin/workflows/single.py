@@ -199,6 +199,7 @@ def run_wrapped_phase_single(
             "admitted_fraction",
             "inconsistent_admitted",
             "admitted_bias",
+            "admitted_temporal_coherence",
         ):
             output_files[key] = OutputFile(
                 output_folder / f"{key}_{start_end}.tif", np.float32, strides, nodata=np.nan

@@ -160,8 +160,10 @@ class PhaseLinkingOptions(BaseModel, extra="forbid"):
         False,
         description=(
             "Write the per-pixel gate layers beside temporal coherence:"
-            " max_consistent_lag, admitted_fraction, inconsistent_admitted and"
-            " admitted_bias (radians). Requires a floor or a gate."
+            " max_consistent_lag, admitted_fraction, inconsistent_admitted,"
+            " admitted_bias (radians) and admitted_temporal_coherence (the fit of"
+            " the solution to the admitted entries only; temporal_coherence itself"
+            " is always measured over the whole matrix). Requires a floor or a gate."
         ),
     )
 

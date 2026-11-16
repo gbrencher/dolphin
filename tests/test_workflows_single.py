@@ -79,6 +79,7 @@ def test_single_writes_gate_layers(tmp_path, slc_file_list):
         "admitted_fraction",
         "inconsistent_admitted",
         "admitted_bias",
+        "admitted_temporal_coherence",
     ):
         files = list(output_folder.glob(f"{key}_*.tif"))
         assert len(files) == 1
@@ -90,6 +91,6 @@ def test_single_writes_gate_layers(tmp_path, slc_file_list):
     assert valid.any()
     # Layers that are defined everywhere share temporal coherence's footprint:
     # NaN-valued neighbours in another layer must not erode them.
-    for key in ("max_consistent_lag", "admitted_fraction"):
+    for key in ("max_consistent_lag", "admitted_fraction", "admitted_temporal_coherence"):
         np.testing.assert_array_equal(np.isfinite(layers[key]), valid)
     assert np.isnan(layers["inconsistent_admitted"]).all()
