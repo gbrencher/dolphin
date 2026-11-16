@@ -18,6 +18,7 @@ from typing_extensions import Self
 from dolphin import constants
 
 from ._common import (
+    ElevationCorrectionOptions,
     InputOptions,
     InterferogramNetwork,
     OutputOptions,
@@ -120,6 +121,9 @@ class DisplacementWorkflow(WorkflowBase):
         default_factory=InterferogramNetwork
     )
     unwrap_options: UnwrapOptions = Field(default_factory=UnwrapOptions)
+    elevation_correction: ElevationCorrectionOptions = Field(
+        default_factory=ElevationCorrectionOptions
+    )
     timeseries_options: TimeseriesOptions = Field(default_factory=TimeseriesOptions)
 
     # internal helpers
@@ -214,6 +218,7 @@ class DisplacementWorkflow(WorkflowBase):
             "phase_linking",
             "interferogram_network",
             "unwrap_options",
+            "elevation_correction",
             "timeseries_options",
         ]:
             opts = getattr(self, step)
@@ -248,6 +253,19 @@ class DisplacementWorkflow(WorkflowBase):
         self.timeseries_options._velocity_file = (
             work_dir / self.timeseries_options._velocity_file
         )
+
+        if self.elevation_correction.enabled:
+            if self.timeseries_options.subtract_reference:
+                msg = (
+                    "elevation_correction.enabled requires"
+                    " timeseries_options.subtract_reference: false. The corrected"
+                    " interferograms are referenced locally, and subtracting one"
+                    " pixel would add its noise to every other."
+                )
+                raise ValueError(msg)
+            if self.unwrap_options.unwrap_method == UnwrapMethod.SPURT:
+                msg = "elevation_correction is not implemented for spurt unwrapping"
+                raise ValueError(msg)
 
         # Modify interferogram options if using spurt for 3d unwrapping,
         # which only does nearest-3 interferograms

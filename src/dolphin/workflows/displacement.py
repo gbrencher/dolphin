@@ -15,7 +15,7 @@ from typing import Any
 from opera_utils import group_by_burst
 from tqdm.auto import tqdm
 
-from dolphin import __version__, timeseries, utils
+from dolphin import __version__, atmosphere, timeseries, utils
 from dolphin._log import log_runtime, setup_logging
 from dolphin.timeseries import ReferencePoint
 
@@ -431,6 +431,23 @@ def run(
     )
 
     # ##############################################
+    # 3b. Optionally remove the elevation-dependent signal from each pair
+    # ##############################################
+
+    elevation_opts = cfg.elevation_correction
+    if elevation_opts.enabled:
+        unwrapped_for_inversion = atmosphere.correct_unwrapped_interferograms(
+            unw_file_list=unwrapped_paths,
+            cor_file_list=stitched_paths.interferometric_corr_paths,
+            dem_file=elevation_opts.dem_file,
+            output_dir=elevation_opts._directory,
+            settings=elevation_opts.to_settings(),
+            num_workers=elevation_opts.n_parallel_jobs,
+        )
+    else:
+        unwrapped_for_inversion = unwrapped_paths
+
+    # ##############################################
     # 4. If a network was unwrapped, invert it
     # ##############################################
 
@@ -440,7 +457,7 @@ def run(
         # the output of run_timeseries is not currently used so pre-commit removes it
         # let's add back if we need it
         timeseries_paths, timeseries_residual_paths, reference_point = timeseries.run(
-            unwrapped_paths=unwrapped_paths,
+            unwrapped_paths=unwrapped_for_inversion,
             conncomp_paths=conncomp_paths,
             corr_paths=stitched_paths.interferometric_corr_paths,
             # TODO: Right now we don't have the option to pick a different candidate
@@ -462,6 +479,7 @@ def run(
             extra_reference_date=cfg.output_options.extra_reference_date,
             file_date_fmt=cfg.input_options.cslc_date_fmt,
             write_ifg_residuals=ts_opts.write_ifg_residuals,
+            subtract_reference=ts_opts.subtract_reference,
         )
 
     else:
