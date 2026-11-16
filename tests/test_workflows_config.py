@@ -435,3 +435,33 @@ def test_config_ps_workflow_defaults(dir_with_1_slc):
     assert c.output_options == config.OutputOptions()
     # has different private directories
     assert c.ps_options.model_dump() == config.PsOptions().model_dump()
+
+
+def test_elevation_correction_options(dir_with_1_slc):
+    """Enabled needs a DEM and an inversion that subtracts no reference pixel."""
+    from dolphin.workflows import config
+
+    with pytest.raises(ValueError, match="dem_file"):
+        config.ElevationCorrectionOptions(enabled=True)
+    opts = config.ElevationCorrectionOptions(enabled=True, dem_file="dem.tif")
+    assert opts.to_settings().coherence_threshold == 0.8
+
+    base = {
+        "cslc_file_list": dir_with_1_slc / "slclist.txt",
+        "input_options": {"subdataset": "data"},
+    }
+    c = config.DisplacementWorkflow(**base)
+    assert not c.elevation_correction.enabled
+    assert c.timeseries_options.subtract_reference
+    assert c.elevation_correction._directory.name == "elevation_corrected"
+    assert c.elevation_correction._directory.parent == c.work_directory
+    with pytest.raises(ValueError, match="subtract_reference"):
+        config.DisplacementWorkflow(
+            elevation_correction={"enabled": True, "dem_file": "dem.tif"}, **base
+        )
+    c = config.DisplacementWorkflow(
+        elevation_correction={"enabled": True, "dem_file": "dem.tif"},
+        timeseries_options={"subtract_reference": False},
+        **base,
+    )
+    assert c.elevation_correction.enabled

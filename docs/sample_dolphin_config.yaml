@@ -371,6 +371,44 @@ unwrap_options:
       #   single batch.
       #   Type: integer.
       num_parallel_ifgs: 3
+elevation_correction:
+  # Before inversion, remove from each unwrapped interferogram a polynomial of phase against
+  #   elevation, fitted to coherent reference pixels in overlapping tiles and blended.
+  #   Requires `dem_file` and `timeseries_options.subtract_reference: false`.
+  #   Type: boolean.
+  enabled: false
+  # Elevation raster covering the interferograms, any projection; resampled bilinearly to
+  #   their grid.
+  #   Type: string | null.
+  dem_file:
+  # Tile edge length, metres.
+  #   Type: number.
+  tile_size: 4000.0
+  # Spacing between tile origins, metres.
+  #   Type: number.
+  step: 1000.0
+  # Reference pixels are those whose interferometric correlation in that interferogram
+  #   exceeds this.
+  #   Type: number.
+  coherence_threshold: 0.8
+  # A tile with fewer reference pixels grows before it is fitted.
+  #   Type: integer.
+  min_refs: 25
+  # Times a tile may grow by one step on every side.
+  #   Type: integer.
+  max_expansions: 8
+  # Polynomial order of phase against elevation.
+  #   Type: integer.
+  order: 2
+  # Elevation bin width, metres.
+  #   Type: number.
+  bin_width: 100.0
+  # Bins with fewer reference pixels are not fitted.
+  #   Type: integer.
+  min_samples_per_bin: 10
+  # Interferograms corrected in parallel.
+  #   Type: integer.
+  n_parallel_jobs: 1
 timeseries_options:
   # Whether to run the inversion step after unwrapping, if more than  a single-reference
   #   network is used.
@@ -395,6 +433,12 @@ timeseries_options:
   #   marks an unwrapping decision that the rest of the network contradicts.
   #   Type: boolean.
   write_ifg_residuals: false
+  # Subtract the reference point's value from every unwrapped interferogram before
+  #   inversion. Must be False with `elevation_correction.enabled`, whose output is
+  #   referenced locally: subtracting one pixel would add that pixel's noise to every other.
+  #   The reference point is still selected and recorded.
+  #   Type: boolean.
+  subtract_reference: true
   # If providing a mask file, whether to apply the mask to the timeseries. If True, the time
   #   series rasters will zero out pixels labeled as 0 in the mask file.
   #   Type: boolean.

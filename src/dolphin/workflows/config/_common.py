@@ -35,6 +35,7 @@ __all__ = [
     "PhaseLinkingOptions",
     "PsOptions",
     "Strides",
+    "ElevationCorrectionOptions",
     "TimeseriesOptions",
     "WorkerSettings",
 ]
@@ -301,6 +302,84 @@ class InterferogramNetwork(BaseModel, extra="forbid"):
     )
 
 
+class ElevationCorrectionOptions(BaseModel, extra="forbid"):
+    """Tiled elevation-dependent correction of unwrapped interferograms.
+
+    See `dolphin.atmosphere.elevation`. Off by default.
+    """
+
+    _directory: Path = PrivateAttr(Path("elevation_corrected"))
+    enabled: bool = Field(
+        False,
+        description=(
+            "Before inversion, remove from each unwrapped interferogram a polynomial"
+            " of phase against elevation, fitted to coherent reference pixels in"
+            " overlapping tiles and blended. Requires `dem_file` and"
+            " `timeseries_options.subtract_reference: false`."
+        ),
+    )
+    dem_file: Optional[Path] = Field(
+        None,
+        description=(
+            "Elevation raster covering the interferograms, any projection; resampled"
+            " bilinearly to their grid."
+        ),
+    )
+    tile_size: float = Field(4000.0, gt=0, description="Tile edge length, metres.")
+    step: float = Field(
+        1000.0, gt=0, description="Spacing between tile origins, metres."
+    )
+    coherence_threshold: float = Field(
+        0.8,
+        ge=0.0,
+        lt=1.0,
+        description=(
+            "Reference pixels are those whose interferometric correlation in that"
+            " interferogram exceeds this."
+        ),
+    )
+    min_refs: int = Field(
+        25,
+        ge=3,
+        description="A tile with fewer reference pixels grows before it is fitted.",
+    )
+    max_expansions: int = Field(
+        8, ge=0, description="Times a tile may grow by one step on every side."
+    )
+    order: int = Field(
+        2, ge=0, le=3, description="Polynomial order of phase against elevation."
+    )
+    bin_width: float = Field(100.0, gt=0, description="Elevation bin width, metres.")
+    min_samples_per_bin: int = Field(
+        10, ge=3, description="Bins with fewer reference pixels are not fitted."
+    )
+    n_parallel_jobs: int = Field(
+        1, ge=1, description="Interferograms corrected in parallel."
+    )
+
+    @model_validator(mode="after")
+    def _check_dem(self):
+        if self.enabled and self.dem_file is None:
+            msg = "elevation_correction.enabled requires elevation_correction.dem_file"
+            raise ValueError(msg)
+        return self
+
+    def to_settings(self):
+        """Return the parameters as `ElevationCorrectionSettings`."""
+        from dolphin.atmosphere.elevation import ElevationCorrectionSettings
+
+        return ElevationCorrectionSettings(
+            tile_size=self.tile_size,
+            step=self.step,
+            coherence_threshold=self.coherence_threshold,
+            min_refs=self.min_refs,
+            max_expansions=self.max_expansions,
+            order=self.order,
+            bin_width=self.bin_width,
+            min_samples_per_bin=self.min_samples_per_bin,
+        )
+
+
 class TimeseriesOptions(BaseModel, extra="forbid"):
     """Options for inversion/time series fitting."""
 
@@ -338,6 +417,16 @@ class TimeseriesOptions(BaseModel, extra="forbid"):
             " a per-pixel summary, `flag_fraction`: the fraction of interferograms"
             " whose residual exceeds half a cycle. A residual near a multiple of 2 pi"
             " marks an unwrapping decision that the rest of the network contradicts."
+        ),
+    )
+    subtract_reference: bool = Field(
+        True,
+        description=(
+            "Subtract the reference point's value from every unwrapped interferogram"
+            " before inversion. Must be False with `elevation_correction.enabled`,"
+            " whose output is referenced locally: subtracting one pixel would add"
+            " that pixel's noise to every other. The reference point is still"
+            " selected and recorded."
         ),
     )
     apply_mask_to_timeseries: bool = Field(

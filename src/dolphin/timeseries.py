@@ -61,6 +61,7 @@ def run(
     extra_reference_date: datetime | None = None,
     file_date_fmt: str = "%Y%m%d",
     write_ifg_residuals: bool = False,
+    subtract_reference: bool = True,
 ) -> tuple[list[Path], list[Path] | None, ReferencePoint]:
     """Invert the unwrapped interferograms, estimate timeseries and phase velocity.
 
@@ -196,6 +197,12 @@ def run(
         logger.info(
             "Skipping inversion step: only single reference interferograms exist."
         )
+        if not subtract_reference:
+            msg = (
+                "subtract_reference=False is only implemented for a network that"
+                " is inverted, not for single-reference interferograms"
+            )
+            raise NotImplementedError(msg)
         # Copy over the unwrapped paths to `timeseries/`
         final_ts_paths = _convert_and_reference(
             unwrapped_paths,
@@ -219,6 +226,7 @@ def run(
             bad_pixel_mask=bad_pixel_mask,
             file_date_fmt=file_date_fmt,
             write_ifg_residuals=write_ifg_residuals,
+            subtract_reference=subtract_reference,
         )
         if extra_reference_date is None:
             final_ts_paths = inverted_phase_paths
@@ -255,7 +263,7 @@ def run(
         create_velocity(
             unw_file_list=final_ts_paths,
             output_file=velocity_file,
-            reference=ref_point,
+            reference=ref_point if subtract_reference else None,
             cor_file_list=cor_file_list,
             cor_threshold=correlation_threshold,
             block_shape=block_shape,
@@ -975,6 +983,7 @@ def invert_unw_network(
     num_threads: int = 4,
     file_date_fmt: str = "%Y%m%d",
     write_ifg_residuals: bool = False,
+    subtract_reference: bool = True,
 ) -> tuple[list[Path], list[Path]]:
     """Perform pixel-wise inversion of unwrapped network to get phase per date.
 
@@ -1035,6 +1044,12 @@ def invert_unw_network(
           exceeds half a cycle (pi radians) in magnitude.
 
         Default is False.
+    subtract_reference : bool, optional
+        Subtract the value at `reference` from every interferogram before
+        solving. Set False when the interferograms already share a spatial
+        reference, for example after
+        `dolphin.atmosphere.correct_unwrapped_interferograms`, whose output is
+        referenced locally. Default is True.
 
     Returns
     -------
@@ -1123,6 +1138,11 @@ def invert_unw_network(
     # Get the reference point data
     ref_row, ref_col = reference
     ref_data = unw_reader[:, ref_row, ref_col].reshape(-1, 1, 1)
+    if not subtract_reference:
+        # The interferograms carry their own spatial reference (e.g. after a
+        # locally referenced atmospheric correction): subtracting one pixel
+        # would add that pixel's noise to every other.
+        ref_data = np.ma.zeros(ref_data.shape, dtype=ref_data.dtype)
     if ref_data.mask.sum() > 0:
         logger.warning(f"Masked data found at {ref_row}, {ref_col}.")
         logger.warning("Zeroing out reference pixel. Results may be wrong.")
