@@ -104,6 +104,8 @@ def run_phase_linking(
     consistency_gate: str = "none",
     consistency_k: float = 3.0,
     keep_lag: int = 1,
+    gate_history: bool = False,
+    history_anchor: int = 0,
 ) -> PhaseLinkOutput:
     """Estimate the linked phase for a stack of SLCs.
 
@@ -252,6 +254,8 @@ def run_phase_linking(
         consistency_gate=consistency_gate,
         consistency_k=consistency_k,
         keep_lag=keep_lag,
+        gate_history=gate_history,
+        history_anchor=history_anchor,
     )
 
     # Get the smaller, looked versions of the masks
@@ -318,6 +322,8 @@ def run_cpl(
     consistency_gate: str = "none",
     consistency_k: float = 3.0,
     keep_lag: int = 1,
+    gate_history: bool = False,
+    history_anchor: int = 0,
 ) -> PhaseLinkOutput:
     """Run the Combined Phase Linking (CPL) algorithm.
 
@@ -426,6 +432,12 @@ def run_cpl(
     C_full = C_arrays
     gate_output = None
     gated = coherence_floor > 0 or consistency_gate != "none"
+    # Compressed images are history under the gate only on request; otherwise
+    # they are ordinary leading elements of the stack, as delivered.
+    n_history = first_real_slc_idx if gate_history else 0
+    if n_history and not (gated and use_weighted_evd):
+        msg = "gate_history requires a floor or gate and the weighted eigenvector"
+        raise ValueError(msg)
     if gated:
         # The consistency noise uses the realised look count where SHPs were
         # selected and the nominal window otherwise.
@@ -445,6 +457,8 @@ def run_cpl(
             gate=consistency_gate,
             k=float(consistency_k),
             keep_lag=int(keep_lag),
+            n_history=int(n_history),
+            anchor=int(history_anchor),
         )
 
     reference_idx = ns + reference_idx if reference_idx < 0 else reference_idx
@@ -459,13 +473,18 @@ def run_cpl(
         compute_crlb=compute_crlb,
         eigen_solver=eigen_solver,
         use_weighted_evd=use_weighted_evd,
+        n_history=int(n_history),
     )
     # Temporal coherence keeps its delivered meaning under a gate: how well the
     # solution reproduces the phase of every entry of the coherence matrix.
     # Measured over the admitted entries alone it is inflated wherever few are
     # admitted and exactly 1 where only the nearest-neighbour band is, which
     # are the least coherent pixels; that version is kept as a gate layer.
-    temp_coh = metrics.estimate_temp_coh(cpx_phase, C_full)
+    # History images that the gate dropped have no estimated phase, so with
+    # gated history it is measured over the real acquisitions.
+    temp_coh = metrics.estimate_temp_coh(
+        cpx_phase[..., n_history:], C_full[..., n_history:, n_history:]
+    )
 
     # An unsupported acquisition has a zero diagonal. Without this mask the
     # solver can return zero phase and unit temporal coherence for an empty window.
@@ -521,6 +540,7 @@ def _shp_counts(neighbor_arrays, shape) -> Array:
         "compute_crlb",
         "eigen_solver",
         "use_weighted_evd",
+        "n_history",
     ),
 )
 def process_coherence_matrices(
@@ -534,6 +554,7 @@ def process_coherence_matrices(
     compute_crlb: bool = True,
     eigen_solver: str = "iterative",
     use_weighted_evd: bool = False,
+    n_history: int = 0,
 ) -> tuple[Array, Array, Array, Array]:
     """Estimate the linked phase for a stack of coherence matrices.
 
@@ -638,6 +659,12 @@ def process_coherence_matrices(
         g = jnp.clip(jnp.abs(C_arrays), 0.0, 0.99)
         W = jnp.where(present, g**2 / (1 - g**2), 0.0)
         W = jnp.where(Id > 0, 1.0, W)
+        if n_history:
+            # A history image with no admitted entry is an isolated node; give
+            # it zero weight so it cannot compete for the principal eigenvector.
+            off_diagonal = present & (Id == 0)
+            isolated = ~jnp.any(off_diagonal, axis=-1) & (jnp.arange(n) < n_history)
+            W = jnp.where((Id > 0) & isolated[..., None], 0.0, W)
         phase = jnp.where(present, jnp.exp(1j * jnp.angle(C_arrays)), 0)
         eig_vals, eig_vecs = eigh_largest_stack_exact(W * phase)
         # Where the gate left only the nearest-neighbour band the graph is a
@@ -646,12 +673,27 @@ def process_coherence_matrices(
         # a chain decays geometrically, below the solver's relative accuracy
         # at the far end over a 15-date stack, so use the closed form.
         lag = jnp.abs(jnp.arange(n)[:, None] - jnp.arange(n)[None, :])
-        chain_only = jnp.all(jnp.where(lag > 1, ~present, True), axis=(-2, -1))
+        if n_history:
+            # The band is between consecutive real acquisitions only; every
+            # entry of a history image is a long entry.
+            index = np.arange(n)
+            lag_np = np.abs(index[:, None] - index[None, :])
+            is_real = index >= n_history
+            in_band = (lag_np == 1) & is_real[:, None] & is_real[None, :]
+            long_entry = jnp.asarray((lag_np > 0) & ~in_band)
+        else:
+            long_entry = lag > 1
+        chain_only = jnp.all(jnp.where(long_entry, ~present, True), axis=(-2, -1))
         band = jnp.stack(
-            [jnp.angle(C_arrays[..., i, i + 1]) for i in range(n - 1)], axis=-1
+            [jnp.angle(C_arrays[..., i, i + 1]) for i in range(n_history, n - 1)],
+            axis=-1,
         )
         chain_phase = jnp.concatenate(
-            [jnp.zeros_like(band[..., :1]), jnp.cumsum(band, axis=-1)], axis=-1
+            [
+                jnp.zeros_like(band[..., :1]).repeat(n_history + 1, axis=-1),
+                jnp.cumsum(band, axis=-1),
+            ],
+            axis=-1,
         )
         chain_vecs = jnp.exp(-1j * chain_phase).astype(eig_vecs.dtype)
         eig_vecs = jnp.where(chain_only[..., None], chain_vecs, eig_vecs)

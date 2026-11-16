@@ -156,6 +156,30 @@ class PhaseLinkingOptions(BaseModel, extra="forbid"):
     keep_lag: int = Field(
         1, ge=1, description="Lags up to this value are never dropped by the gate."
     )
+    gate_compressed_history: bool = Field(
+        False,
+        description=(
+            "Treat compressed SLCs in the input as history under the gate instead"
+            " of as the reference: they are left out of the nearest-neighbour band"
+            " and of the lags, and each is admitted per pixel only where its phase"
+            " agrees with the chained nearest-neighbour phases. Every compressed"
+            " SLC must carry the base phase of the real acquisition at"
+            " `history_anchor_idx`, and `output_reference_idx` must point at a real"
+            " acquisition. The interferogram network is then formed from the real"
+            " acquisitions alone. Requires a floor or gate and `use_weighted_evd`."
+        ),
+    )
+    history_anchor_idx: int = Field(
+        0,
+        ge=0,
+        description=(
+            "With `gate_compressed_history`: index, among the real acquisitions of"
+            " the stack, of the one whose base phase every compressed SLC carries."
+            " It is given here and not read from the file names, because inputs are"
+            " sorted by the first date in their names and a compressed SLC must"
+            " sort before the real acquisitions."
+        ),
+    )
     write_consistency: bool = Field(
         False,
         description=(
@@ -173,6 +197,12 @@ class PhaseLinkingOptions(BaseModel, extra="forbid"):
             msg = "use_evd and use_weighted_evd are mutually exclusive"
             raise ValueError(msg)
         gated = self.coherence_floor_false_admission or self.consistency_gate != "none"
+        if self.gate_compressed_history and not (gated and self.use_weighted_evd):
+            msg = (
+                "gate_compressed_history requires a coherence floor or a consistency"
+                " gate, and use_weighted_evd"
+            )
+            raise ValueError(msg)
         if self.write_consistency and not gated:
             msg = "write_consistency requires a coherence floor or a consistency gate"
             raise ValueError(msg)

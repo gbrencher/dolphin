@@ -23,6 +23,18 @@ always kept so every acquisition stays connected):
 
 The pooled noise treats the entries of a lag as independent, which they are
 not, so the lag gate is somewhat conservative toward dropping lags.
+
+Compressed history. With `n_history` > 0 the first `n_history` elements of the
+stack are compressed images of earlier batches, each carrying the base phase of
+one real acquisition of the current stack, the anchor. They take no part in
+the band or in the lags: those are defined on the real acquisitions alone. A
+history image is treated as one more long entry per real acquisition, predicted
+by the chained nearest-neighbour phases between the anchor and that
+acquisition, and admitted per pixel by the same floor and the same consistency
+test, pooled over the real acquisitions. History images are admitted from the
+newest to the oldest until the first inconsistent one. Entries between two
+history images are always dropped; they say nothing about the real
+acquisitions. With `n_history` = 0 the function is unchanged.
 """
 
 from __future__ import annotations
@@ -55,6 +67,26 @@ class GateOutput(NamedTuple):
     admitted_bias: Array
     """Mean |lag bias| of the admitted long entries, radians; NaN where none."""
 
+    signed_bias_lag2: Array | None = None
+    """Pooled lag bias at lag 2, radians, signed: the phase of a lag-2 entry minus
+    the sum of the two nearest-neighbour entries it spans, circular mean over
+    every start. This is the mean closure phase of consecutive triplets. Computed
+    before any entry is dropped; NaN where the stack is too short."""
+
+    signed_bias_lag3: Array | None = None
+    """As `signed_bias_lag2`, at lag 3."""
+
+    signed_bias_lag4: Array | None = None
+    """As `signed_bias_lag2`, at lag 4."""
+
+    history_admitted: Array | None = None
+    """Number of compressed history images with at least one admitted entry; 0
+    without history."""
+
+    history_bias: Array | None = None
+    """Pooled bias of the newest history image against the chain, radians,
+    signed, computed before any entry is dropped; NaN without history."""
+
     admitted_temporal_coherence: Array | None = None
     """Temporal coherence of the solution over the admitted entries only. Filled
     in by `run_cpl` once the phase is solved. It measures how well the solution
@@ -80,7 +112,10 @@ def phase_variance(coherence: ArrayLike, looks: ArrayLike) -> Array:
     return (1 - g**2) / (2 * looks * g**2)
 
 
-@partial(jit, static_argnames=("floor", "gate", "k", "keep_lag"))
+@partial(
+    jit,
+    static_argnames=("floor", "gate", "k", "keep_lag", "n_history", "anchor"),
+)
 def gate_coherence_matrices(
     C_arrays: ArrayLike,
     looks: ArrayLike,
@@ -88,6 +123,8 @@ def gate_coherence_matrices(
     gate: str = "none",
     k: float = 3.0,
     keep_lag: int = 1,
+    n_history: int = 0,
+    anchor: int = 0,
 ) -> tuple[Array, GateOutput]:
     """Zero the entries of each pixel's coherence matrix that fail the gate.
 
@@ -105,6 +142,11 @@ def gate_coherence_matrices(
         Consistency threshold in units of the Cramer-Rao noise.
     keep_lag : int
         Lags up to this value are never dropped.
+    n_history : int
+        Number of leading elements that are compressed history images.
+    anchor : int
+        Index, among the real acquisitions, of the one whose base phase every
+        history image carries.
 
     Returns
     -------
@@ -118,6 +160,16 @@ def gate_coherence_matrices(
     if gate not in ("none", "entry", "lag", "chain"):
         msg = f"gate must be one of none, entry, lag, chain; got {gate!r}"
         raise ValueError(msg)
+    if n_history:
+        return _gate_with_history(
+            C_arrays, looks, floor, gate, k, keep_lag, n_history, anchor
+        )
+    C_gated, out, _ = _gate_real(C_arrays, looks, floor, gate, k, keep_lag)
+    return C_gated, out
+
+
+def _gate_real(C_arrays, looks, floor, gate, k, keep_lag):
+    """Gate a stack of real acquisitions; also return the chain it was tested against."""
     n = C_arrays.shape[-1]
     iu0, iu1 = np.triu_indices(n, 1)
     lag_of_pair = iu1 - iu0
@@ -147,9 +199,12 @@ def gate_coherence_matrices(
 
     # Pooled per-lag consistency, admitting lags in order until the first failure.
     lag_passes = []
+    signed = {}
     for lag in range(2, n):
         idx = lag_of_pair == lag
         pooled = jnp.angle(jnp.exp(1j * bias[..., idx]).mean(-1))
+        if lag <= 4:
+            signed[lag] = pooled.astype(jnp.float32)
         pooled_noise = jnp.sqrt((noise[..., idx] ** 2).mean(-1) / int(idx.sum()))
         lag_passes.append(jnp.abs(pooled) / jnp.maximum(pooled_noise, 1e-6) <= k)
     ok_lag = jnp.cumprod(jnp.stack(lag_passes, -1).astype(jnp.int32), axis=-1) > 0
@@ -176,6 +231,7 @@ def gate_coherence_matrices(
     n_admitted = admitted_long.sum(-1)
     safe = jnp.maximum(n_admitted, 1)
     nan = jnp.float32(jnp.nan)
+    missing = jnp.full(max_consistent_lag.shape, jnp.nan, dtype=jnp.float32)
     out = GateOutput(
         max_consistent_lag=max_consistent_lag.astype(jnp.float32),
         admitted_fraction=keep.mean(-1).astype(jnp.float32),
@@ -185,5 +241,65 @@ def gate_coherence_matrices(
         admitted_bias=jnp.where(
             n_admitted > 0, (jnp.abs(bias) * admitted_long).sum(-1) / safe, nan
         ).astype(jnp.float32),
+        signed_bias_lag2=signed.get(2, missing),
+        signed_bias_lag3=signed.get(3, missing),
+        signed_bias_lag4=signed.get(4, missing),
+        history_admitted=jnp.zeros(max_consistent_lag.shape, dtype=jnp.float32),
+        history_bias=missing,
+    )
+    return C_gated, out, (theta, cum_var)
+
+
+def _gate_with_history(C_arrays, looks, floor, gate, k, keep_lag, n_history, anchor):
+    """Gate the real acquisitions, then test each history image against their chain."""
+    h = n_history
+    n_real = C_arrays.shape[-1] - h
+    if not 0 <= anchor < n_real:
+        msg = f"anchor {anchor} is not one of the {n_real} real acquisitions"
+        raise ValueError(msg)
+    real_gated, out, (theta, cum_var) = _gate_real(
+        C_arrays[..., h:, h:], looks, floor, gate, k, keep_lag
+    )
+    looks_ = jnp.maximum(looks, 1).astype(jnp.float32)[..., None]
+
+    # A history image stands at the anchor: its entry with real acquisition t is
+    # predicted by the chain from the anchor to t.
+    predicted = theta - theta[..., anchor : anchor + 1]
+    chain_var = jnp.abs(cum_var - cum_var[..., anchor : anchor + 1])
+    entries = C_arrays[..., :h, h:]  # (..., history, real)
+    bias = jnp.angle(jnp.exp(1j * (jnp.angle(entries) - predicted[..., None, :])))
+    noise = jnp.sqrt(
+        phase_variance(jnp.abs(entries), looks_[..., None]) + chain_var[..., None, :]
+    )
+    z = jnp.abs(bias) / jnp.maximum(noise, 1e-6)
+    pooled = jnp.angle(jnp.exp(1j * bias).mean(-1))  # (..., history)
+    pooled_noise = jnp.sqrt((noise**2).mean(-1) / n_real)
+    passes = jnp.abs(pooled) / jnp.maximum(pooled_noise, 1e-6) <= k
+    # Newest first: admit history images until the first inconsistent one.
+    ok = jnp.cumprod(passes[..., ::-1].astype(jnp.int32), axis=-1)[..., ::-1] > 0
+
+    drop = jnp.zeros(bias.shape, dtype=bool)
+    if floor > 0:
+        drop = drop | (jnp.abs(entries) < floor)
+    if gate == "entry":
+        drop = drop | (z > k)
+    elif gate == "lag":
+        drop = drop | ~ok[..., None]
+    elif gate == "chain":
+        drop = jnp.ones_like(drop)
+    kept = jnp.where(drop, 0, entries)
+
+    C_gated = C_arrays.at[..., h:, h:].set(real_gated)
+    C_gated = C_gated.at[..., :h, h:].set(kept)
+    C_gated = C_gated.at[..., h:, :h].set(jnp.conj(jnp.swapaxes(kept, -1, -2)))
+    diagonal = jnp.diagonal(C_arrays[..., :h, :h], axis1=-2, axis2=-1)
+    between = jnp.zeros_like(C_arrays[..., :h, :h])
+    idx = np.arange(h)
+    between = between.at[..., idx, idx].set(diagonal)
+    C_gated = C_gated.at[..., :h, :h].set(between)
+
+    out = out._replace(
+        history_admitted=(jnp.abs(kept) > 0).any(-1).sum(-1).astype(jnp.float32),
+        history_bias=pooled[..., -1].astype(jnp.float32),
     )
     return C_gated, out

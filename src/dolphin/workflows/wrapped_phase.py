@@ -248,6 +248,8 @@ def run(
             consistency_gate=cfg.phase_linking.consistency_gate,
             consistency_k=cfg.phase_linking.consistency_k,
             keep_lag=cfg.phase_linking.keep_lag,
+            gate_compressed_history=cfg.phase_linking.gate_compressed_history,
+            history_anchor_idx=cfg.phase_linking.history_anchor_idx,
             write_consistency=cfg.phase_linking.write_consistency,
             beta=cfg.phase_linking.beta,
             zero_correlation_threshold=cfg.phase_linking.zero_correlation_threshold,
@@ -333,7 +335,10 @@ def run(
     ifg_file_list = create_ifgs(
         interferogram_network=ifg_network,
         phase_linked_slcs=phase_linked_slcs,
-        contained_compressed_slcs=any(is_compressed),
+        # With gated history the linked phases are referenced to a real
+        # acquisition and the compressed SLCs are not part of the network.
+        contained_compressed_slcs=any(is_compressed)
+        and not cfg.phase_linking.gate_compressed_history,
         reference_date=reference_date,
         extra_reference_date=extra_reference_date,
         file_date_fmt=cfg.input_options.cslc_date_fmt,
