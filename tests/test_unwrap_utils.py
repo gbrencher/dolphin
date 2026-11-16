@@ -95,3 +95,44 @@ def test_set_nodata_values(corr_raster):
         a = src.read(1)
         assert np.all(a[:20] == -2)
         assert np.all(a[:, :20] == -2)
+
+
+def test_nodata_of_complex_raster_compares_both_parts(tmp_path):
+    """A purely imaginary pixel is data, not nodata, in a complex raster."""
+    import rasterio
+
+    ifg = np.ones((10, 10), dtype="complex64")
+    ifg[0, :] = 0  # genuinely empty
+    ifg[5, 5] = 1j  # phase of exactly pi/2
+    ifg[6, 6] = -1j
+    ifg_file = tmp_path / "ifg.int.tif"
+    io.write_arr(arr=ifg, output_name=ifg_file, nodata=0, driver="GTiff")
+    # The dataset mask itself gets this wrong, which is what the helper avoids.
+    with rasterio.open(ifg_file) as src:
+        assert not src.read_masks(1)[5, 5]
+        valid = _utils._valid_mask(src)
+    assert valid[5, 5] and valid[6, 6]
+    assert not valid[0].any()
+
+    unw_file = tmp_path / "ifg.unw.tif"
+    io.write_arr(
+        arr=np.full((10, 10), 3.0, dtype="float32"),
+        output_name=unw_file,
+        like_filename=ifg_file,
+        nodata=0,
+        driver="GTiff",
+    )
+    _utils.set_nodata_values(filename=unw_file, output_nodata=0, like_filename=ifg_file)
+    unw = io.load_gdal(unw_file)
+    assert unw[5, 5] == 3.0 and unw[6, 6] == 3.0
+    assert (unw[0] == 0).all()
+
+    mask_file = tmp_path / "mask.tif"
+    io.write_arr(
+        arr=np.ones((10, 10), dtype="uint8"), output_name=mask_file, like_filename=ifg_file
+    )
+    combined = io.load_gdal(
+        _utils.create_combined_mask(mask_filename=mask_file, image_filename=ifg_file)
+    )
+    assert combined[5, 5] == 1 and combined[6, 6] == 1
+    assert (combined[0] == 0).all()

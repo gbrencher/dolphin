@@ -3,12 +3,33 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import numpy as np
 import rasterio as rio
 
 from dolphin import io
 from dolphin._types import Filename
 
 logger = logging.getLogger("dolphin")
+
+
+def _valid_mask(src, band: int = 1) -> np.ndarray:
+    """Boolean array, True where `band` of the open rasterio dataset is not nodata.
+
+    For real rasters this is the dataset mask. For complex rasters the dataset
+    mask cannot be used: GDAL compares only the real part with the nodata
+    value, so a pixel whose real part happens to equal it (with nodata 0, any
+    purely imaginary value, i.e. a phase of exactly +/- pi/2) is reported as
+    nodata although it holds data. Compare the full complex value instead.
+    """
+    if not np.issubdtype(np.dtype(src.dtypes[band - 1]), np.complexfloating):
+        return src.read_masks(band).astype(bool)
+    nodata = src.nodatavals[band - 1]
+    if nodata is None:
+        return np.ones((src.height, src.width), dtype=bool)
+    arr = src.read(band)
+    if np.isnan(nodata):
+        return ~np.isnan(arr)
+    return arr != nodata
 
 
 def create_combined_mask(
@@ -56,7 +77,7 @@ def create_combined_mask(
         # rasterio loads this where 0 means the pixel is masked, and
         # 255 is valid.
         # coerce to True == valid pixels
-        nd_mask = src.read_masks(band).astype(bool)
+        nd_mask = _valid_mask(src, band)
 
     # In the existing mask, 1 should be valid, 0 invalid
     mask = io.load_gdal(mask_filename).astype(bool)
@@ -104,7 +125,7 @@ def set_nodata_values(
         # https://rasterio.readthedocs.io/en/stable/topics/masks.html
         # rasterio loads this where 0 means the pixel is masked
         # Reform to be like a numpy mask
-        bad_like = ~(src.read_masks(1).astype(bool))
+        bad_like = ~_valid_mask(src, 1)
 
     with rio.open(filename, "r+") as dst:
         # We also want to keep the currently-nodata-pixels as nodata,

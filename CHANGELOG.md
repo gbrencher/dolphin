@@ -9,6 +9,7 @@
 
 ### Fixed
 - `run_phase_linking` dropped the gate layers that `run_cpl` returned, so `write_consistency` raised in the workflow at the first block. The layers are passed through.
+- The unwrapping stage took a pixel of a complex interferogram as nodata when only its real part equalled the nodata value: with nodata 0, any purely imaginary value, a phase of exactly +/- pi/2. GDAL's dataset mask compares the real part only. `set_nodata_values` and `create_combined_mask` now compare the full complex value. Linked phase stored to 12 bits makes such values recur, about 13 pixels per interferogram on a 1200 x 600 crop.
 - The gate layers were eroded at block edges by their own NaNs, and `inconsistent_admitted` and `admitted_bias` are NaN by definition wherever no long entry is admitted, which would have erased valid pixels within two pixels of each such pixel. They now take the footprint of temporal coherence.
 
 ## [0.42.0](https://github.com/isce-framework/dolphin/compare/v0.41.0...v0.42.0) - 2025-08-19
