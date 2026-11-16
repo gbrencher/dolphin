@@ -55,6 +55,13 @@ class GateOutput(NamedTuple):
     admitted_bias: Array
     """Mean |lag bias| of the admitted long entries, radians; NaN where none."""
 
+    admitted_temporal_coherence: Array | None = None
+    """Temporal coherence of the solution over the admitted entries only. Filled
+    in by `run_cpl` once the phase is solved. It measures how well the solution
+    fits what it was given, and is exactly 1 where only the nearest-neighbour
+    band was admitted (a chain reproduces its own entries), so it is not a
+    measure of data quality; `temp_coh`, over the whole matrix, is."""
+
 
 def floor_threshold(false_admission: float, nlooks: int) -> float:
     """Sample-coherence magnitude that a truly incoherent entry exceeds with probability p.

@@ -153,3 +153,29 @@ def test_run_phase_linking_keeps_gate_layers():
     )
     assert out.gate is not None
     assert np.asarray(out.gate.max_consistent_lag).shape == (9, 9)
+
+
+def test_temporal_coherence_is_over_the_whole_matrix_when_gated():
+    """A chain gate fits its own entries exactly but not the matrix it came from."""
+    C, _ = simulate.simulate_coh(num_acq=N, add_signal=True)
+    samples = simulate.simulate_neighborhood_stack(C, 9 * 9).reshape(N, 9, 9)
+    kwargs = dict(half_window=HalfWindow(x=4, y=4), strides=Strides(x=1, y=1),
+                  use_weighted_evd=True, compute_crlb=False)
+    chain = _core.run_cpl(samples, consistency_gate="chain", **kwargs)
+    admitted = np.asarray(chain.gate.admitted_temporal_coherence)
+    full = np.asarray(chain.temp_coh)
+    # Over its admitted band the chain reproduces every entry.
+    npt.assert_allclose(admitted, 1.0, atol=1e-4)
+    # Against the whole matrix it cannot, on noisy data.
+    assert np.all(full < admitted)
+    assert np.all((full >= 0) & (full <= 1))
+    # The delivered definition: the same number `estimate_temp_coh` gives for
+    # this solution against the ungated matrix.
+    from dolphin.phase_link import covariance, metrics
+    C_hat = covariance.estimate_stack_covariance(
+        samples, HalfWindow(x=4, y=4), Strides(x=1, y=1)
+    )
+    expected = metrics.estimate_temp_coh(np.moveaxis(np.asarray(chain.cpx_phase), 0, -1), C_hat)
+    npt.assert_allclose(full, np.asarray(expected), atol=1e-5)
+    plain = _core.run_cpl(samples, **kwargs)
+    assert plain.gate is None
