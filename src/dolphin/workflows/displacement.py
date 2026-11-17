@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 from dolphin import __version__, atmosphere, timeseries, utils
 from dolphin._log import log_runtime, setup_logging
 from dolphin.timeseries import ReferencePoint
-from dolphin.unwrap._post_looks import look_after_unwrapping
+from dolphin.unwrap._post_looks import look_after_unwrapping, look_files
 
 from . import stitching_bursts, unwrapping, wrapped_phase
 from ._block_split import (
@@ -454,6 +454,45 @@ def run(
         post_conncomp_paths = looked.conncomp_paths
         post_cor_paths = looked.cor_paths
         post_quality_file = looked.quality_files[0]
+        # The other layers a product carries, so that everything returned is
+        # on the product grid. Wrapped interferograms are averaged as complex
+        # numbers; the persistent-scatterer mask marks a cell with any PS.
+        _dir, _posting = cfg.post_unwrap._directory, cfg.post_unwrap.posting
+
+        def _looked(paths, kind="mean"):
+            return look_files(paths, _dir, _posting, kind)
+
+        product_layers = {
+            "stitched_ifg_paths": _looked(stitched_paths.ifg_paths),
+            "stitched_cor_paths": post_cor_paths,
+            "stitched_temp_coh_files": _looked(stitched_paths.temp_coh_files),
+            "stitched_crlb_files": _looked(stitched_paths.crlb_paths),
+            "stitched_closure_phase_files": _looked(
+                stitched_paths.closure_phase_files
+            ),
+            "stitched_ps_file": _looked([stitched_paths.ps_file], "any")[0],
+            "stitched_amp_dispersion_file": _looked(
+                [stitched_paths.amp_dispersion_file]
+            )[0],
+            "stitched_shp_count_files": _looked(stitched_paths.shp_count_files),
+            "stitched_similarity_files": _looked(stitched_paths.similarity_files),
+            "unwrapped_paths": post_unwrapped_paths,
+            "conncomp_paths": post_conncomp_paths,
+        }
+    else:
+        product_layers = {
+            "stitched_ifg_paths": stitched_paths.ifg_paths,
+            "stitched_cor_paths": stitched_paths.interferometric_corr_paths,
+            "stitched_temp_coh_files": stitched_paths.temp_coh_files,
+            "stitched_crlb_files": stitched_paths.crlb_paths,
+            "stitched_closure_phase_files": stitched_paths.closure_phase_files,
+            "stitched_ps_file": stitched_paths.ps_file,
+            "stitched_amp_dispersion_file": stitched_paths.amp_dispersion_file,
+            "stitched_shp_count_files": stitched_paths.shp_count_files,
+            "stitched_similarity_files": stitched_paths.similarity_files,
+            "unwrapped_paths": unwrapped_paths,
+            "conncomp_paths": conncomp_paths,
+        }
 
     # ##############################################
     # 3b. Optionally remove the elevation-dependent signal from each pair
@@ -516,22 +555,14 @@ def run(
     _print_summary(cfg)
     return OutputPaths(
         comp_slc_dict=comp_slc_dict,
-        stitched_ifg_paths=stitched_paths.ifg_paths,
-        stitched_cor_paths=stitched_paths.interferometric_corr_paths,
-        stitched_temp_coh_files=stitched_paths.temp_coh_files,
-        stitched_crlb_files=stitched_paths.crlb_paths,
-        stitched_closure_phase_files=stitched_paths.closure_phase_files,
-        stitched_ps_file=stitched_paths.ps_file,
-        stitched_amp_dispersion_file=stitched_paths.amp_dispersion_file,
-        stitched_shp_count_files=stitched_paths.shp_count_files,
-        stitched_similarity_files=stitched_paths.similarity_files,
-        unwrapped_paths=unwrapped_paths,
-        # TODO: Let's keep the unwrapped_paths since all the outputs are
-        # corresponding to those and if we have a network unwrapping, the
+        # With `post_unwrap.posting` these are the layers on the product grid;
+        # the files on the unwrapping grid stay where the stages wrote them.
+        # TODO (upstream): Let's keep the unwrapped_paths since all the outputs
+        # are corresponding to those and if we have a network unwrapping, the
         # inversion would create different single-reference network and we need
         # to update other products like conncomp
         # unwrapped_paths=inverted_phase_paths,
-        conncomp_paths=conncomp_paths,
+        **product_layers,
         timeseries_paths=timeseries_paths,
         timeseries_residual_paths=timeseries_residual_paths,
         reference_point=reference_point,
