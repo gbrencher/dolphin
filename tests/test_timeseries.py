@@ -404,3 +404,76 @@ if __name__ == "__main__":
     sar_phases = make_sar_phases(sar_dates)
     ifg_date_pairs = make_ifg_date_pairs(sar_dates)
     ifgs = make_ifgs(sar_phases)
+
+
+class TestInvertWithMissingDates:
+    """`invert_stack_l1_missing`: each pixel is solved on the interferograms it has."""
+
+    n_dates = 9
+
+    def _network(self):
+        pairs = [
+            (i, j)
+            for i in range(self.n_dates)
+            for j in range(i + 1, min(i + 4, self.n_dates))
+        ]
+        A = np.asarray(timeseries.get_incidence_matrix(pairs, list(range(self.n_dates))))
+        truth = np.linspace(0, 4, self.n_dates) ** 1.5
+        data = np.array([truth[j] - truth[i] for i, j in pairs], dtype=np.float32)
+        return pairs, A, truth, data
+
+    def _solve(self, lacking_dates=(), lacking_pairs=()):
+        pairs, A, truth, data = self._network()
+        missing = np.array(
+            [(i in lacking_dates) or (j in lacking_dates) for i, j in pairs]
+        )
+        missing[list(lacking_pairs)] = True
+        dphi = np.where(missing, 123.0, data)[:, None, None].astype(np.float32)
+        phase, residual, date_missing = timeseries.invert_stack_l1_missing(
+            A, dphi, missing[:, None, None]
+        )
+        return truth, phase[:, 0, 0], residual[0, 0], date_missing[:, 0, 0]
+
+    def test_complete_pixel_matches_the_plain_inversion(self):
+        truth, phase, residual, date_missing = self._solve()
+        npt.assert_allclose(phase, truth[1:] - truth[0], atol=1e-3)
+        assert not date_missing.any() and residual < 1e-2
+
+    def test_a_missing_date_is_left_out_and_the_rest_is_solved(self):
+        truth, phase, _, date_missing = self._solve(lacking_dates=[4])
+        assert date_missing.tolist() == [k == 4 for k in range(1, self.n_dates)]
+        keep = [k for k in range(1, self.n_dates) if k != 4]
+        npt.assert_allclose(phase[[k - 1 for k in keep]], truth[keep] - truth[0], atol=1e-3)
+        assert np.isnan(phase[3])
+
+    def test_two_missing_dates_in_a_row_are_spanned_by_the_longest_pair(self):
+        truth, phase, _, date_missing = self._solve(lacking_dates=[4, 5])
+        keep = [1, 2, 3, 6, 7, 8]
+        assert date_missing.sum() == 2
+        npt.assert_allclose(phase[[k - 1 for k in keep]], truth[keep] - truth[0], atol=1e-3)
+
+    def test_three_missing_dates_in_a_row_cut_the_series(self):
+        """With three nearest neighbours no pair spans three dates: what follows is lost."""
+        _, phase, _, date_missing = self._solve(lacking_dates=[3, 4, 5])
+        assert date_missing.tolist() == [k >= 3 for k in range(1, self.n_dates)]
+        assert np.isfinite(phase[:2]).all()
+
+    def test_a_missing_first_date_moves_the_reference_to_the_next(self):
+        truth, phase, _, date_missing = self._solve(lacking_dates=[0])
+        assert not date_missing.any()
+        npt.assert_allclose(phase, truth[1:] - truth[1], atol=1e-3)
+
+    def test_an_unexplained_gap_leaves_the_pixel_unsolved(self):
+        _, phase, residual, date_missing = self._solve(lacking_pairs=[5])
+        assert date_missing.all() and np.isnan(phase).all() and np.isnan(residual)
+
+    def test_pixels_with_different_gaps_are_solved_together(self):
+        pairs, A, truth, data = self._network()
+        missing = np.zeros((len(pairs), 1, 3), dtype=bool)
+        missing[:, 0, 1] = [(i == 2) or (j == 2) for i, j in pairs]
+        missing[:, 0, 2] = True
+        dphi = np.repeat(data[:, None, None], 3, axis=2)
+        phase, _, date_missing = timeseries.invert_stack_l1_missing(A, dphi, missing)
+        npt.assert_allclose(phase[:, 0, 0], truth[1:] - truth[0], atol=1e-3)
+        assert date_missing[:, 0, 1].tolist() == [k == 2 for k in range(1, self.n_dates)]
+        assert date_missing[:, 0, 2].all()

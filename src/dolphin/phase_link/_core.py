@@ -77,6 +77,10 @@ class PhaseLinkOutput(NamedTuple):
     """The closure phases at each pixel, for N-2 images."""
 
     gate: Optional[GateOutput] = None
+
+    missing_dates: Optional[np.ndarray] = None
+    """With `bridge_missing_dates`: True where an acquisition has no data at a
+    pixel and was bridged, shape (nslc, out_rows, out_cols)."""
     """Per-pixel layers from gating the coherence matrix, if a gate was applied."""
 
 
@@ -106,6 +110,7 @@ def run_phase_linking(
     keep_lag: int = 1,
     gate_history: bool = False,
     history_anchor: int = 0,
+    bridge_missing_dates: bool = False,
 ) -> PhaseLinkOutput:
     """Estimate the linked phase for a stack of SLCs.
 
@@ -256,6 +261,7 @@ def run_phase_linking(
         keep_lag=keep_lag,
         gate_history=gate_history,
         history_anchor=history_anchor,
+        bridge_missing_dates=bridge_missing_dates,
     )
 
     # Get the smaller, looked versions of the masks
@@ -287,6 +293,13 @@ def run_phase_linking(
         slcs_decimated = decimate(slc_stack, strides)
         cpx_phase = np.exp(1j * np.angle(cpx_phase)) * np.abs(slcs_decimated)
 
+    # A bridged acquisition has no phase of its own, also at PS pixels
+    missing_dates = (
+        None if cpl_out.missing_dates is None else np.asarray(cpl_out.missing_dates)
+    )
+    if missing_dates is not None:
+        cpx_phase[missing_dates] = np.nan
+
     # Finally, ensure the nodata regions are 0
     cpx_phase[:, mask_looked] = np.nan
     temp_coh[mask_looked] = np.nan
@@ -300,6 +313,7 @@ def run_phase_linking(
         estimator=np.asarray(cpl_out.estimator),
         crlb_std_dev=np.array(cpl_out.crlb_std_dev),
         closure_phases=np.asarray(cpl_out.closure_phases),
+        missing_dates=missing_dates,
         gate=cpl_out.gate,
     )
 
@@ -324,6 +338,7 @@ def run_cpl(
     keep_lag: int = 1,
     gate_history: bool = False,
     history_anchor: int = 0,
+    bridge_missing_dates: bool = False,
 ) -> PhaseLinkOutput:
     """Run the Combined Phase Linking (CPL) algorithm.
 
@@ -421,6 +436,18 @@ def run_cpl(
         C_arrays = C_arrays.at[:, :, u_rows, u_cols].set(0.0 + 0j)
         C_arrays = C_arrays.at[:, :, l_rows, l_cols].set(0.0 + 0j)
 
+    # An acquisition with no data in a pixel's window (its samples are all
+    # zero, e.g. blanked where a regional screen dropped it) has a zero
+    # diagonal. Bridged, each pixel's acquisitions are reordered so those with
+    # data come first, in time order: the nearest-neighbour band, the gate and
+    # the solve then see the stack that pixel would have without the missing
+    # acquisitions, which trail as isolated entries. The order is undone on
+    # the way out and the missing acquisitions get no phase.
+    missing_dates = present = order = None
+    n_lead = first_real_slc_idx if gate_history else 0
+    if bridge_missing_dates:
+        C_arrays, present, order = compact_missing_dates(C_arrays, n_lead)
+
     closure_phases = compute_nearest_closure_phases_batch(C_arrays)
     # For a more conservative uncertainty estimate, use a smaller number of looks
     # rather than `num_looks = (2 * half_window[0] + 1) * (2 * half_window[1] + 1)`
@@ -459,6 +486,7 @@ def run_cpl(
             keep_lag=int(keep_lag),
             n_history=int(n_history),
             anchor=int(history_anchor),
+            present=None if present is None else present[..., n_history:],
         )
 
     reference_idx = ns + reference_idx if reference_idx < 0 else reference_idx
@@ -467,7 +495,9 @@ def run_cpl(
         use_evd=use_evd,
         beta=beta,
         zero_correlation_threshold=zero_correlation_threshold,
-        reference_idx=reference_idx,
+        # Reordered, the first acquisition with data sits at `n_lead`.
+        reference_idx=reference_idx if order is None else n_lead,
+        zero_isolated=order is not None,
         num_looks=num_looks,
         first_real_slc_idx=first_real_slc_idx,
         compute_crlb=compute_crlb,
@@ -488,7 +518,23 @@ def run_cpl(
 
     # An unsupported acquisition has a zero diagonal. Without this mask the
     # solver can return zero phase and unit temporal coherence for an empty window.
-    no_support = jnp.any(jnp.diagonal(C_arrays, axis1=-2, axis2=-1) == 0, axis=-1)
+    if order is None:
+        no_support = jnp.any(
+            jnp.diagonal(C_arrays, axis1=-2, axis2=-1) == 0, axis=-1
+        )
+    else:
+        # Back to time order, referenced to `reference_idx` where it has data
+        # and otherwise to the pixel's first acquisition with data.
+        inverse = jnp.argsort(order, axis=-1)
+        cpx_phase = jnp.take_along_axis(cpx_phase, inverse, axis=-1)
+        crlb_std_dev = jnp.take_along_axis(crlb_std_dev, inverse, axis=-1)
+        present = jnp.take_along_axis(present, inverse, axis=-1)
+        ref = cpx_phase[..., reference_idx]
+        ref = jnp.where(present[..., reference_idx], jnp.exp(-1j * jnp.angle(ref)), 1)
+        cpx_phase = cpx_phase * ref[..., None]
+        no_support = present[..., n_lead:].sum(axis=-1) < 2
+        missing_dates = ~present & ~no_support[..., None]
+        cpx_phase = jnp.where(missing_dates, jnp.nan, cpx_phase)
     cpx_phase = jnp.where(no_support[..., None], jnp.nan, cpx_phase)
     crlb_std_dev = jnp.where(no_support[..., None], jnp.nan, crlb_std_dev)
     temp_coh = jnp.where(no_support, jnp.nan, temp_coh)
@@ -513,7 +559,41 @@ def run_cpl(
         crlb_std_dev=crlb_std_dev_reshaped,
         closure_phases=closure_phases,
         gate=gate_output,
+        missing_dates=(
+            None if missing_dates is None else jnp.moveaxis(missing_dates, -1, 0)
+        ),
     )
+
+
+@partial(jit, static_argnames=("n_lead",))
+def compact_missing_dates(
+    C_arrays: ArrayLike, n_lead: int = 0
+) -> tuple[Array, Array, Array]:
+    """Reorder each pixel's acquisitions so those with data come first.
+
+    An acquisition is missing at a pixel where its diagonal entry is zero. The
+    first `n_lead` elements (compressed history) keep their place; the rest are
+    ordered with data first, in their original order, and without data last.
+
+    Returns
+    -------
+    C_ordered : Array
+        The matrices with rows and columns reordered.
+    present : Array
+        Boolean, shape (rows, cols, nslc), in the new order.
+    order : Array
+        Shape (rows, cols, nslc): the original index now at each position.
+
+    """
+    n = C_arrays.shape[-1]
+    present = jnp.real(jnp.diagonal(C_arrays, axis1=-2, axis2=-1)) > 0
+    lead = jnp.arange(n) < n_lead
+    # Sort key: leading elements first, then present, then missing; ties keep time order.
+    key = jnp.where(lead, 0, jnp.where(present, 1, 2))
+    order = jnp.argsort(key, axis=-1, stable=True)
+    ordered = jnp.take_along_axis(C_arrays, order[..., :, None], axis=-2)
+    ordered = jnp.take_along_axis(ordered, order[..., None, :], axis=-1)
+    return ordered, jnp.take_along_axis(present, order, axis=-1), order
 
 
 def _shp_counts(neighbor_arrays, shape) -> Array:
@@ -541,6 +621,7 @@ def _shp_counts(neighbor_arrays, shape) -> Array:
         "eigen_solver",
         "use_weighted_evd",
         "n_history",
+        "zero_isolated",
     ),
 )
 def process_coherence_matrices(
@@ -555,6 +636,7 @@ def process_coherence_matrices(
     eigen_solver: str = "iterative",
     use_weighted_evd: bool = False,
     n_history: int = 0,
+    zero_isolated: bool = False,
 ) -> tuple[Array, Array, Array, Array]:
     """Estimate the linked phase for a stack of coherence matrices.
 
@@ -665,6 +747,11 @@ def process_coherence_matrices(
             off_diagonal = present & (Id == 0)
             isolated = ~jnp.any(off_diagonal, axis=-1) & (jnp.arange(n) < n_history)
             W = jnp.where((Id > 0) & isolated[..., None], 0.0, W)
+        if zero_isolated:
+            # An acquisition with no entry at all (missing at this pixel) must
+            # not compete for the principal eigenvector.
+            alone = ~jnp.any(present & (Id == 0), axis=-1)
+            W = jnp.where((Id > 0) & alone[..., None], 0.0, W)
         phase = jnp.where(present, jnp.exp(1j * jnp.angle(C_arrays)), 0)
         eig_vals, eig_vecs = eigh_largest_stack_exact(W * phase)
         # Where the gate left only the nearest-neighbour band the graph is a

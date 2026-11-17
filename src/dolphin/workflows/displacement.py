@@ -544,6 +544,7 @@ def run(
             file_date_fmt=cfg.input_options.cslc_date_fmt,
             write_ifg_residuals=ts_opts.write_ifg_residuals,
             subtract_reference=ts_opts.subtract_reference,
+            allow_missing_dates=ts_opts.allow_missing_dates,
         )
 
     else:
