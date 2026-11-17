@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 from dolphin import __version__, atmosphere, timeseries, utils
 from dolphin._log import log_runtime, setup_logging
 from dolphin.timeseries import ReferencePoint
+from dolphin.unwrap._post_looks import look_after_unwrapping
 
 from . import stitching_bursts, unwrapping, wrapped_phase
 from ._block_split import (
@@ -431,21 +432,45 @@ def run(
     )
 
     # ##############################################
+    # 3a. Optionally average the unwrapped pairs to the product posting
+    # ##############################################
+
+    # Everything from here on uses these; the outputs returned for the
+    # wrapped and unwrapped stages stay on the unwrapping grid.
+    post_unwrapped_paths = unwrapped_paths
+    post_conncomp_paths = conncomp_paths
+    post_cor_paths = stitched_paths.interferometric_corr_paths
+    post_quality_file = avg_temp_coh_file
+    if cfg.post_unwrap.posting is not None:
+        looked = look_after_unwrapping(
+            unw_file_list=unwrapped_paths,
+            conncomp_file_list=conncomp_paths,
+            cor_file_list=stitched_paths.interferometric_corr_paths,
+            posting=cfg.post_unwrap.posting,
+            output_dir=cfg.post_unwrap._directory,
+            quality_files=[avg_temp_coh_file],
+        )
+        post_unwrapped_paths = looked.unwrapped_paths
+        post_conncomp_paths = looked.conncomp_paths
+        post_cor_paths = looked.cor_paths
+        post_quality_file = looked.quality_files[0]
+
+    # ##############################################
     # 3b. Optionally remove the elevation-dependent signal from each pair
     # ##############################################
 
     elevation_opts = cfg.elevation_correction
     if elevation_opts.enabled:
         unwrapped_for_inversion = atmosphere.correct_unwrapped_interferograms(
-            unw_file_list=unwrapped_paths,
-            cor_file_list=stitched_paths.interferometric_corr_paths,
+            unw_file_list=post_unwrapped_paths,
+            cor_file_list=post_cor_paths,
             dem_file=elevation_opts.dem_file,
             output_dir=elevation_opts._directory,
             settings=elevation_opts.to_settings(),
             num_workers=elevation_opts.n_parallel_jobs,
         )
     else:
-        unwrapped_for_inversion = unwrapped_paths
+        unwrapped_for_inversion = post_unwrapped_paths
 
     # ##############################################
     # 4. If a network was unwrapped, invert it
@@ -458,12 +483,12 @@ def run(
         # let's add back if we need it
         timeseries_paths, timeseries_residual_paths, reference_point = timeseries.run(
             unwrapped_paths=unwrapped_for_inversion,
-            conncomp_paths=conncomp_paths,
-            corr_paths=stitched_paths.interferometric_corr_paths,
+            conncomp_paths=post_conncomp_paths,
+            corr_paths=post_cor_paths,
             # TODO: Right now we don't have the option to pick a different candidate
             # or quality file. Figure out if this is worth exposing
             reference_point=cfg.timeseries_options.reference_point,
-            quality_file=avg_temp_coh_file,
+            quality_file=post_quality_file,
             reference_candidate_threshold=0.95,
             output_dir=ts_opts._directory,
             method=timeseries.InversionMethod(ts_opts.method),

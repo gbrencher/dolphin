@@ -19,6 +19,7 @@ from dolphin import constants
 
 from ._common import (
     ElevationCorrectionOptions,
+    PostUnwrapOptions,
     InputOptions,
     InterferogramNetwork,
     OutputOptions,
@@ -121,6 +122,7 @@ class DisplacementWorkflow(WorkflowBase):
         default_factory=InterferogramNetwork
     )
     unwrap_options: UnwrapOptions = Field(default_factory=UnwrapOptions)
+    post_unwrap: PostUnwrapOptions = Field(default_factory=PostUnwrapOptions)
     elevation_correction: ElevationCorrectionOptions = Field(
         default_factory=ElevationCorrectionOptions
     )
@@ -218,6 +220,7 @@ class DisplacementWorkflow(WorkflowBase):
             "phase_linking",
             "interferogram_network",
             "unwrap_options",
+            "post_unwrap",
             "elevation_correction",
             "timeseries_options",
         ]:

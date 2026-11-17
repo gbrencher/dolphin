@@ -36,6 +36,7 @@ __all__ = [
     "PsOptions",
     "Strides",
     "ElevationCorrectionOptions",
+    "PostUnwrapOptions",
     "TimeseriesOptions",
     "WorkerSettings",
 ]
@@ -298,6 +299,27 @@ class InterferogramNetwork(BaseModel, extra="forbid"):
         description=(
             "For manual-index network: list of (ref_idx, sec_idx) defining the"
             " interferograms to form."
+        ),
+    )
+
+
+class PostUnwrapOptions(BaseModel, extra="forbid"):
+    """The grid of everything that follows unwrapping.
+
+    See `dolphin.unwrap._post_looks`. Off by default.
+    """
+
+    _directory: Path = PrivateAttr(Path("unwrapped_looked"))
+    posting: Optional[float] = Field(
+        None,
+        gt=0,
+        description=(
+            "Side of a square cell, in the units of the projection (metres), that"
+            " the unwrapped interferograms, their connected components and"
+            " correlation, and the quality raster are averaged to after"
+            " unwrapping. The elevation correction, the inversion and the time"
+            " series are then on that grid. Must be a whole multiple of both"
+            " pixel sizes of the unwrapping grid. None keeps the unwrapping grid."
         ),
     )
 
