@@ -6,7 +6,9 @@ import rasterio
 from rasterio.transform import Affine
 
 from dolphin.unwrap._post_looks import (
+    any_in_cells,
     labels_of_cells,
+    look_files,
     look_after_unwrapping,
     looks_for_posting,
     mean_of_valid,
@@ -110,3 +112,30 @@ def test_the_option_is_off_by_default():
     assert PostUnwrapOptions().posting is None
     with pytest.raises(ValueError):
         PostUnwrapOptions(posting=0)
+
+
+def test_a_mask_cell_is_set_if_any_pixel_is():
+    mask = np.zeros((2, 12), dtype=np.uint8)
+    mask[1, 2] = 1
+    mask[:, 8:] = 255
+    out = any_in_cells(mask, 255, 2, 4)
+    assert out.tolist() == [[1, 0, 255]] and out.dtype == np.uint8
+
+
+def test_complex_and_integer_rasters_keep_their_types(tmp_path):
+    rng = np.random.default_rng(1)
+    ifg = (rng.normal(size=(4, 8)) + 1j * rng.normal(size=(4, 8))).astype(np.complex64)
+    counts = rng.integers(1, 150, size=(4, 8)).astype(np.uint16)
+    _write(tmp_path / "a.int.tif", ifg, 0.0)
+    _write(tmp_path / "shp_counts.tif", counts, 0)
+    out = look_files(
+        [tmp_path / "a.int.tif", tmp_path / "shp_counts.tif"], tmp_path / "looked", 20.0
+    )
+    with rasterio.open(out[0]) as src:
+        assert src.dtypes[0] == "complex64"
+        np.testing.assert_allclose(src.read(1)[0, 0], ifg[:2, :4].mean(), rtol=1e-5)
+    with rasterio.open(out[1]) as src:
+        assert src.dtypes[0] == "uint16"
+        assert src.read(1)[1, 1] == np.rint(counts[2:, 4:].mean())
+    with pytest.raises(ValueError, match="kind"):
+        look_files([tmp_path / "a.int.tif"], tmp_path / "looked", 20.0, kind="median")

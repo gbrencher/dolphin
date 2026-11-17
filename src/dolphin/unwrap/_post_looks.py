@@ -28,7 +28,7 @@ from dolphin._types import Filename
 
 logger = logging.getLogger("dolphin")
 
-__all__ = ["LookedPaths", "look_after_unwrapping", "looks_for_posting"]
+__all__ = ["LookedPaths", "look_after_unwrapping", "look_files", "looks_for_posting"]
 
 
 @dataclass
@@ -72,7 +72,7 @@ def mean_of_valid(array: np.ndarray, nodata: float | None, rows: int, cols: int)
 
     Returns (mean, any_valid); the mean is 0 where no pixel of a cell is valid.
     """
-    values = array.astype(np.float64)
+    values = array.astype(np.complex128 if np.iscomplexobj(array) else np.float64)
     valid = np.isfinite(values)
     if nodata is not None and np.isfinite(nodata):
         valid &= values != nodata
@@ -98,6 +98,35 @@ def labels_of_cells(array: np.ndarray, nodata: float | None, rows: int, cols: in
     return out.astype(array.dtype)
 
 
+def any_in_cells(array: np.ndarray, nodata: float | None, rows: int, cols: int):
+    """Whether any pixel of each cell is set, for a mask of zeros and ones.
+
+    A cell is 1 if any pixel it covers is nonzero and not `nodata`, `nodata`
+    if every pixel is `nodata`, and 0 otherwise.
+    """
+    missing = np.zeros(array.shape, dtype=bool) if nodata is None else array == nodata
+    missing_blocks = _blocks(missing, rows, cols)
+    out = (_blocks((array != 0) & ~missing, rows, cols)).any(axis=(1, 3))
+    out = out.astype(array.dtype)
+    if nodata is not None:
+        out = np.where(missing_blocks.all(axis=(1, 3)), nodata, out)
+    return out.astype(array.dtype)
+
+
+def look_files(
+    paths: Sequence[Filename], output_dir: Filename, posting: float, kind: str = "mean"
+) -> list[Path]:
+    """Write rasters at `posting` metres into `output_dir`, keeping their names.
+
+    `kind` is "mean" (the mean of valid pixels; real or complex), "label"
+    (connected components; see `labels_of_cells`) or "any" (a mask; see
+    `any_in_cells`).
+    """
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return [_look_file(p, out_dir, posting, kind) for p in paths]
+
+
 def _look_file(path: Filename, out_dir: Path, posting: float, kind: str) -> Path:
     out = out_dir / Path(path).name
     with rasterio.open(path) as src:
@@ -108,10 +137,17 @@ def _look_file(path: Filename, out_dir: Path, posting: float, kind: str) -> Path
     rows, cols = looks_for_posting(posting, profile["transform"])
     if kind == "label":
         looked = labels_of_cells(array, nodata, rows, cols)
-    else:
+    elif kind == "any":
+        looked = any_in_cells(array, nodata, rows, cols)
+    elif kind == "mean":
         mean, any_valid = mean_of_valid(array, nodata, rows, cols)
         fill = 0.0 if nodata is None else nodata
+        if np.issubdtype(array.dtype, np.integer):
+            mean = np.rint(mean)
         looked = np.where(any_valid, mean, fill).astype(array.dtype)
+    else:
+        msg = f"kind must be mean, label or any; got {kind!r}"
+        raise ValueError(msg)
     t = profile["transform"]
     profile.update(
         height=looked.shape[0],
