@@ -171,6 +171,17 @@ class PhaseLinkingOptions(BaseModel, extra="forbid"):
             " acquisitions alone. Requires a floor or gate and `use_weighted_evd`."
         ),
     )
+    bridge_missing_dates: bool = Field(
+        False,
+        description=(
+            "Where an acquisition has no data in a pixel's window (all zero, e.g."
+            " blanked where a regional screen dropped it), link across it instead"
+            " of discarding the pixel: the acquisition is treated as absent from"
+            " the stack there, so its neighbours become adjacent, and its own"
+            " phase is written as nodata. Without this, a pixel lacking any one"
+            " acquisition has no estimate at all."
+        ),
+    )
     history_anchor_idx: int = Field(
         0,
         ge=0,
@@ -439,6 +450,16 @@ class TimeseriesOptions(BaseModel, extra="forbid"):
             " a per-pixel summary, `flag_fraction`: the fraction of interferograms"
             " whose residual exceeds half a cycle. A residual near a multiple of 2 pi"
             " marks an unwrapping decision that the rest of the network contradicts."
+        ),
+    )
+    allow_missing_dates: bool = Field(
+        False,
+        description=(
+            "L1 inversion only. Where a pixel lacks every interferogram of some"
+            " acquisitions (e.g. dropped by a regional screen and bridged in phase"
+            " linking), invert the interferograms it has for the acquisitions it"
+            " has, and write the others as nodata. Without this, a pixel lacking"
+            " any interferogram has no time series."
         ),
     )
     subtract_reference: bool = Field(

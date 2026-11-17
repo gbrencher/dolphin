@@ -62,6 +62,7 @@ def run(
     file_date_fmt: str = "%Y%m%d",
     write_ifg_residuals: bool = False,
     subtract_reference: bool = True,
+    allow_missing_dates: bool = False,
 ) -> tuple[list[Path], list[Path] | None, ReferencePoint]:
     """Invert the unwrapped interferograms, estimate timeseries and phase velocity.
 
@@ -227,6 +228,7 @@ def run(
             file_date_fmt=file_date_fmt,
             write_ifg_residuals=write_ifg_residuals,
             subtract_reference=subtract_reference,
+            allow_missing_dates=allow_missing_dates,
         )
         if extra_reference_date is None:
             final_ts_paths = inverted_phase_paths
@@ -984,6 +986,7 @@ def invert_unw_network(
     file_date_fmt: str = "%Y%m%d",
     write_ifg_residuals: bool = False,
     subtract_reference: bool = True,
+    allow_missing_dates: bool = False,
 ) -> tuple[list[Path], list[Path]]:
     """Perform pixel-wise inversion of unwrapped network to get phase per date.
 
@@ -1188,7 +1191,23 @@ def invert_unw_network(
 
         # TODO: do i want to write residuals too? Do i need
         # to have multiple writers then, or a StackWriter?
-        if method.upper() == "L1":
+        date_missing = None
+        if method.upper() == "L1" and allow_missing_dates:
+            # Invert each pixel on the interferograms it has, where what is
+            # missing is every interferogram of some acquisitions.
+            pair_missing = np.ma.getmaskarray(unw_reader[:, rows, cols])
+            pair_missing = pair_missing | bad_pixel_mask[rows, cols][None, :, :]
+            phases, residual_sum, date_missing = invert_stack_l1_missing(
+                A, stack, pair_missing
+            )
+            # A missing interferogram has no residual: give it its prediction.
+            predicted = np.tensordot(
+                np.asarray(A), np.nan_to_num(np.asarray(phases)), axes=(1, 0)
+            )
+            stack = np.where(pair_missing, predicted, stack)
+            masked_pixels = date_missing.all(axis=0)
+            phases = np.nan_to_num(np.asarray(phases))
+        elif method.upper() == "L1":
             phases, residual_sum = invert_stack_l1(A, stack)
         else:
             phases, residual_sum = invert_stack(A, stack, weights, missing_data_flags)
@@ -1201,6 +1220,8 @@ def invert_unw_network(
         out_displacement = constant * np.asarray(phases)
         # Set the masked pixels to be nodata in the output, and in the residuals
         out_displacement[:, masked_pixels] = unw_nodataval
+        if date_missing is not None:
+            out_displacement[date_missing] = unw_nodataval
         residuals_per_date = np.asarray(
             residuals_per_date.at[:, masked_pixels].set(np.nan)
         )
@@ -1217,6 +1238,13 @@ def invert_unw_network(
             )
             ifg_residuals[:, masked_pixels] = np.nan
             flag_fraction[masked_pixels] = np.nan
+            if date_missing is not None:
+                ifg_residuals[pair_missing] = np.nan
+                present = (~pair_missing).sum(axis=0)
+                flagged = (np.nan_to_num(np.abs(ifg_residuals)) > np.pi).sum(axis=0)
+                flag_fraction = np.where(
+                    present > 0, flagged / np.maximum(present, 1), np.nan
+                ).astype(np.float32)
             layers += [ifg_residuals, flag_fraction[np.newaxis]]
 
         return (np.vstack(layers), rows, cols)
@@ -1588,6 +1616,113 @@ def invert_stack_l1(
     # residuals = jnp.sum(residual_vecs, axis=0)
 
     return phase, residuals
+
+
+
+def invert_stack_l1_missing(
+    A: ArrayLike, dphi: np.ndarray, pair_missing: np.ndarray, max_iter: int = 20
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Solve the L1 inversion per pixel on the interferograms that pixel has.
+
+    A pixel is solved where the interferograms it lacks are exactly those of
+    some set of acquisitions, i.e. those acquisitions are missing there (e.g.
+    dropped by a regional screen and bridged in phase linking). The remaining
+    interferograms are inverted for the remaining acquisitions. Acquisitions
+    that are missing, or that the remaining interferograms do not connect to
+    the first acquisition with data, are returned as missing. Where the first
+    acquisition of the stack is itself missing, the pixel's phases are relative
+    to its first acquisition with data instead.
+
+    A pixel whose missing interferograms are not explained by missing
+    acquisitions is returned as missing altogether, as when the option is off.
+
+    Parameters
+    ----------
+    A : ArrayLike
+        Incidence matrix with the first date's column removed,
+        shape (n_ifgs, n_dates - 1).
+    dphi : np.ndarray
+        Interferogram phases, shape (n_ifgs, rows, cols); any value where missing.
+    pair_missing : np.ndarray
+        Boolean, same shape as `dphi`.
+    max_iter : int
+        ADMM iteration budget, as `invert_stack_l1`.
+
+    Returns
+    -------
+    phase : np.ndarray
+        Shape (n_dates - 1, rows, cols); NaN where missing.
+    residuals : np.ndarray
+        Shape (rows, cols); NaN where nothing was solved.
+    date_missing : np.ndarray
+        Boolean, shape (n_dates - 1, rows, cols).
+
+    """
+    A = np.asarray(A)
+    n_ifg, n_unknown = A.shape
+    n_dates = n_unknown + 1
+    # The two acquisitions of each interferogram, with 0 for the removed first column.
+    second = np.array([int(np.flatnonzero(row > 0)[0]) + 1 for row in A])
+    first = np.array(
+        [int(np.flatnonzero(row < 0)[0]) + 1 if (row < 0).any() else 0 for row in A]
+    )
+    shape = dphi.shape[1:]
+    flat_missing = pair_missing.reshape(n_ifg, -1)
+    flat_data = np.asarray(dphi).reshape(n_ifg, -1)
+    phase = np.full((n_unknown, flat_data.shape[1]), np.nan, dtype=np.float32)
+    residuals = np.full(flat_data.shape[1], np.nan, dtype=np.float32)
+
+    patterns, inverse = np.unique(flat_missing, axis=1, return_inverse=True)
+    inverse = np.asarray(inverse).reshape(-1)
+    for k in range(patterns.shape[1]):
+        lacking = patterns[:, k]
+        pixels = np.flatnonzero(inverse == k)
+        if lacking.all():
+            continue
+        if not lacking.any():
+            sub_A, unknown, rows_used = A, np.arange(1, n_dates), np.arange(n_ifg)
+        else:
+            # Acquisitions all of whose interferograms are lacking.
+            touched = np.zeros(n_dates, dtype=bool)
+            touched[first[~lacking]] = True
+            touched[second[~lacking]] = True
+            gone = ~touched
+            explained = gone[first] | gone[second]
+            if not np.array_equal(explained, lacking):
+                continue
+            # Acquisitions the remaining interferograms connect to the first one with data.
+            start = int(np.flatnonzero(touched)[0])
+            reached = np.zeros(n_dates, dtype=bool)
+            reached[start] = True
+            changed = True
+            while changed:
+                grow = (reached[first] | reached[second]) & ~lacking
+                new = reached.copy()
+                new[first[grow]] = True
+                new[second[grow]] = True
+                changed = bool((new != reached).any())
+                reached = new
+            rows_used = np.flatnonzero(~lacking & reached[first] & reached[second])
+            unknown = np.flatnonzero(reached)
+            unknown = unknown[unknown != start]
+            if unknown.size == 0:
+                continue
+            sub_A = np.zeros((rows_used.size, unknown.size), dtype=A.dtype)
+            column = {int(d): c for c, d in enumerate(unknown)}
+            for r, ifg in enumerate(rows_used):
+                if second[ifg] in column:
+                    sub_A[r, column[int(second[ifg])]] = 1
+                if first[ifg] in column:
+                    sub_A[r, column[int(first[ifg])]] = -1
+        data = flat_data[np.ix_(rows_used, pixels)][:, :, None]
+        solved, resid = invert_stack_l1(jnp.asarray(sub_A), jnp.asarray(data), max_iter)
+        phase[np.ix_(unknown - 1, pixels)] = np.asarray(solved)[:, :, 0]
+        if lacking.any() and start > 0:
+            # The pixel's own first acquisition is its zero.
+            phase[start - 1, pixels] = 0.0
+        residuals[pixels] = np.asarray(resid).reshape(-1)
+    phase = phase.reshape(n_unknown, *shape)
+    return phase, residuals.reshape(shape), ~np.isfinite(phase)
 
 
 @jit

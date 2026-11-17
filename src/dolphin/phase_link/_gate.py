@@ -125,6 +125,7 @@ def gate_coherence_matrices(
     keep_lag: int = 1,
     n_history: int = 0,
     anchor: int = 0,
+    present: ArrayLike | None = None,
 ) -> tuple[Array, GateOutput]:
     """Zero the entries of each pixel's coherence matrix that fail the gate.
 
@@ -147,6 +148,13 @@ def gate_coherence_matrices(
     anchor : int
         Index, among the real acquisitions, of the one whose base phase every
         history image carries.
+    present : ArrayLike, optional
+        Boolean, shape (rows, cols, number of real acquisitions): which real
+        acquisitions have data at each pixel, where missing ones have been
+        ordered last (`dolphin.phase_link._core.compact_missing_dates`).
+        Entries of a missing acquisition are dropped and left out of every
+        pooled statistic, so the gate sees the stack the pixel would have
+        without them.
 
     Returns
     -------
@@ -162,13 +170,13 @@ def gate_coherence_matrices(
         raise ValueError(msg)
     if n_history:
         return _gate_with_history(
-            C_arrays, looks, floor, gate, k, keep_lag, n_history, anchor
+            C_arrays, looks, floor, gate, k, keep_lag, n_history, anchor, present
         )
-    C_gated, out, _ = _gate_real(C_arrays, looks, floor, gate, k, keep_lag)
+    C_gated, out, _ = _gate_real(C_arrays, looks, floor, gate, k, keep_lag, present)
     return C_gated, out
 
 
-def _gate_real(C_arrays, looks, floor, gate, k, keep_lag):
+def _gate_real(C_arrays, looks, floor, gate, k, keep_lag, present=None):
     """Gate a stack of real acquisitions; also return the chain it was tested against."""
     n = C_arrays.shape[-1]
     iu0, iu1 = np.triu_indices(n, 1)
@@ -200,15 +208,38 @@ def _gate_real(C_arrays, looks, floor, gate, k, keep_lag):
     # Pooled per-lag consistency, admitting lags in order until the first failure.
     lag_passes = []
     signed = {}
+    pair_present = None
+    if present is not None:
+        pair_present = present[..., iu0] & present[..., iu1]
     for lag in range(2, n):
         idx = lag_of_pair == lag
-        pooled = jnp.angle(jnp.exp(1j * bias[..., idx]).mean(-1))
+        if pair_present is None:
+            pooled = jnp.angle(jnp.exp(1j * bias[..., idx]).mean(-1))
+            pooled_noise = jnp.sqrt(
+                (noise[..., idx] ** 2).mean(-1) / int(idx.sum())
+            )
+            passes = jnp.abs(pooled) / jnp.maximum(pooled_noise, 1e-6) <= k
+        else:
+            # Pool over the entries between acquisitions that have data; a lag
+            # with none passes, and is capped out of the bandwidth below.
+            w = pair_present[..., idx]
+            count = w.sum(-1)
+            pooled = jnp.angle((jnp.exp(1j * bias[..., idx]) * w).sum(-1))
+            mean_square = (noise[..., idx] ** 2 * w).sum(-1) / jnp.maximum(count, 1)
+            pooled_noise = jnp.sqrt(mean_square / jnp.maximum(count, 1))
+            passes = jnp.where(
+                count > 0, jnp.abs(pooled) / jnp.maximum(pooled_noise, 1e-6) <= k, True
+            )
+            pooled = jnp.where(count > 0, pooled, jnp.nan)
         if lag <= 4:
             signed[lag] = pooled.astype(jnp.float32)
-        pooled_noise = jnp.sqrt((noise[..., idx] ** 2).mean(-1) / int(idx.sum()))
-        lag_passes.append(jnp.abs(pooled) / jnp.maximum(pooled_noise, 1e-6) <= k)
+        lag_passes.append(passes)
     ok_lag = jnp.cumprod(jnp.stack(lag_passes, -1).astype(jnp.int32), axis=-1) > 0
     max_consistent_lag = 1 + ok_lag.sum(-1)
+    if present is not None:
+        max_consistent_lag = jnp.minimum(
+            max_consistent_lag, jnp.maximum(present.sum(-1) - 1, 1)
+        )
 
     drop = jnp.zeros(bias.shape, dtype=bool)
     if floor > 0:
@@ -220,6 +251,8 @@ def _gate_real(C_arrays, looks, floor, gate, k, keep_lag):
     elif gate == "chain":
         drop = jnp.ones_like(drop)
     drop = drop & is_long
+    if pair_present is not None:
+        drop = drop | ~pair_present
 
     upper = jnp.where(drop, 0, entries)
     C_gated = C_arrays.at[..., iu0, iu1].set(upper)
@@ -250,7 +283,9 @@ def _gate_real(C_arrays, looks, floor, gate, k, keep_lag):
     return C_gated, out, (theta, cum_var)
 
 
-def _gate_with_history(C_arrays, looks, floor, gate, k, keep_lag, n_history, anchor):
+def _gate_with_history(
+    C_arrays, looks, floor, gate, k, keep_lag, n_history, anchor, present=None
+):
     """Gate the real acquisitions, then test each history image against their chain."""
     h = n_history
     n_real = C_arrays.shape[-1] - h
@@ -258,7 +293,7 @@ def _gate_with_history(C_arrays, looks, floor, gate, k, keep_lag, n_history, anc
         msg = f"anchor {anchor} is not one of the {n_real} real acquisitions"
         raise ValueError(msg)
     real_gated, out, (theta, cum_var) = _gate_real(
-        C_arrays[..., h:, h:], looks, floor, gate, k, keep_lag
+        C_arrays[..., h:, h:], looks, floor, gate, k, keep_lag, present
     )
     looks_ = jnp.maximum(looks, 1).astype(jnp.float32)[..., None]
 
@@ -272,8 +307,14 @@ def _gate_with_history(C_arrays, looks, floor, gate, k, keep_lag, n_history, anc
         phase_variance(jnp.abs(entries), looks_[..., None]) + chain_var[..., None, :]
     )
     z = jnp.abs(bias) / jnp.maximum(noise, 1e-6)
-    pooled = jnp.angle(jnp.exp(1j * bias).mean(-1))  # (..., history)
-    pooled_noise = jnp.sqrt((noise**2).mean(-1) / n_real)
+    if present is None:
+        pooled = jnp.angle(jnp.exp(1j * bias).mean(-1))  # (..., history)
+        pooled_noise = jnp.sqrt((noise**2).mean(-1) / n_real)
+    else:
+        w = present[..., None, :]
+        count = jnp.maximum(w.sum(-1), 1)
+        pooled = jnp.angle((jnp.exp(1j * bias) * w).sum(-1))
+        pooled_noise = jnp.sqrt((noise**2 * w).sum(-1) / count / count)
     passes = jnp.abs(pooled) / jnp.maximum(pooled_noise, 1e-6) <= k
     # Newest first: admit history images until the first inconsistent one.
     ok = jnp.cumprod(passes[..., ::-1].astype(jnp.int32), axis=-1)[..., ::-1] > 0
@@ -287,6 +328,8 @@ def _gate_with_history(C_arrays, looks, floor, gate, k, keep_lag, n_history, anc
         drop = drop | ~ok[..., None]
     elif gate == "chain":
         drop = jnp.ones_like(drop)
+    if present is not None:
+        drop = drop | ~present[..., None, :]
     kept = jnp.where(drop, 0, entries)
 
     C_gated = C_arrays.at[..., h:, h:].set(real_gated)

@@ -250,6 +250,7 @@ def run(
             keep_lag=cfg.phase_linking.keep_lag,
             gate_compressed_history=cfg.phase_linking.gate_compressed_history,
             history_anchor_idx=cfg.phase_linking.history_anchor_idx,
+            bridge_missing_dates=cfg.phase_linking.bridge_missing_dates,
             write_consistency=cfg.phase_linking.write_consistency,
             beta=cfg.phase_linking.beta,
             zero_correlation_threshold=cfg.phase_linking.zero_correlation_threshold,

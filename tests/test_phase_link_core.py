@@ -382,3 +382,88 @@ def test_gated_history_with_only_the_band_uses_the_closed_form():
     )
     got = np.angle(np.asarray(estimate[0, 0, 1:]) * np.exp(-1j * phases))
     np.testing.assert_allclose(got, 0.0, atol=1e-5)
+
+
+def _stack_with_a_blank_date(blank=3, n=7, shape=(40, 64), seed=0):
+    """Coherent speckle with a known phase per date; one date blanked in the left half."""
+    rng = np.random.default_rng(seed)
+    base = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+    phases = np.linspace(0, 1.5, n)
+    stack = np.stack(
+        [
+            (0.95 * base + 0.3 * (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)))
+            * np.exp(1j * phases[k])
+            for k in range(n)
+        ]
+    ).astype(np.complex64)
+    stack[blank, :, : shape[1] // 2] = 0
+    return stack, phases
+
+
+def test_compact_missing_dates_orders_dates_with_data_first():
+    C = np.full((1, 2, 5, 5), 0.5, dtype=np.complex64)
+    for k in range(5):
+        C[..., k, k] = 1
+    for d in (1, 3):  # dates 1 and 3 missing at the first pixel
+        C[0, 0, d, :] = 0
+        C[0, 0, :, d] = 0
+    C[0, 0, 0, 2] = 0.5 * np.exp(0.3j)
+    C[0, 0, 2, 0] = 0.5 * np.exp(-0.3j)
+    ordered, present, order = _core.compact_missing_dates(jnp.asarray(C))
+    assert np.asarray(order)[0, 0].tolist() == [0, 2, 4, 1, 3]
+    assert np.asarray(present)[0, 0].tolist() == [True, True, True, False, False]
+    ordered = np.asarray(ordered)
+    np.testing.assert_allclose(ordered[0, 0, 0, 1], C[0, 0, 0, 2])  # 0 and 2 now adjacent
+    assert not ordered[0, 0, 3:, :].any() and not ordered[0, 0, :, 3:].any()
+    assert np.asarray(order)[0, 1].tolist() == [0, 1, 2, 3, 4]  # untouched where complete
+    np.testing.assert_array_equal(ordered[0, 1], C[0, 1])
+
+
+def test_compact_missing_dates_keeps_leading_history_in_place():
+    C = np.full((1, 1, 4, 4), 0.5, dtype=np.complex64)
+    for k in range(4):
+        C[..., k, k] = 1
+    C[0, 0, 0, :] = 0
+    C[0, 0, :, 0] = 0  # a history image without data stays first
+    C[0, 0, 2, :] = 0
+    C[0, 0, :, 2] = 0
+    _, present, order = _core.compact_missing_dates(jnp.asarray(C), n_lead=1)
+    assert np.asarray(order)[0, 0].tolist() == [0, 1, 3, 2]
+    assert np.asarray(present)[0, 0].tolist() == [False, True, True, False]
+
+
+def test_bridging_a_blanked_date_keeps_the_pixel_and_matches_the_stack_without_it():
+    stack, phases = _stack_with_a_blank_date()
+    hw, strides = HalfWindow(4, 6), Strides(1, 1)
+    kwargs = {
+        "half_window": hw,
+        "strides": strides,
+        "use_weighted_evd": True,
+        "consistency_gate": "lag",
+        "coherence_floor": 0.1,
+        "compute_crlb": False,
+    }
+    plain = _core.run_cpl(stack, **kwargs)
+    bridged = _core.run_cpl(stack, bridge_missing_dates=True, **kwargs)
+    without = _core.run_cpl(np.delete(stack, 3, axis=0), **kwargs)
+    inside, outside = (slice(10, 30), slice(8, 20)), (slice(10, 30), slice(44, 56))
+    # Unbridged, a pixel lacking one date has no estimate at all.
+    assert np.isnan(np.asarray(plain.cpx_phase)[:, inside[0], inside[1]]).all()
+    phase = np.asarray(bridged.cpx_phase)
+    missing = np.asarray(bridged.missing_dates)
+    assert missing[3][inside].all() and not missing[3][outside].any()
+    assert not missing[[0, 1, 2, 4, 5, 6]].any()
+    assert np.isnan(phase[3][inside]).all()
+    keep = [0, 1, 2, 4, 5, 6]
+    # Inside the blanked half: the same interferograms as the stack without the date.
+    ref = np.asarray(without.cpx_phase)
+    for a, b in ((0, 2), (2, 4), (4, 5)):
+        got = phase[keep[b]] * np.conj(phase[keep[a]])
+        want = ref[b] * np.conj(ref[a])
+        npt.assert_allclose(np.angle(got[inside] * np.conj(want[inside])), 0, atol=1e-5)
+    # Outside it: unchanged by the option.
+    full = np.asarray(plain.cpx_phase)
+    for a, b in ((2, 3), (3, 4), (0, 6)):
+        got = phase[b] * np.conj(phase[a])
+        want = full[b] * np.conj(full[a])
+        npt.assert_allclose(np.angle(got[outside] * np.conj(want[outside])), 0, atol=1e-5)
