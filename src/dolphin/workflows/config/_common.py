@@ -386,6 +386,14 @@ class ElevationCorrectionOptions(BaseModel, extra="forbid"):
     min_samples_per_bin: int = Field(
         10, ge=3, description="Bins with fewer reference pixels are not fitted."
     )
+    blend: Literal["tent", "cone"] = Field(
+        "tent",
+        description=(
+            "Weights of overlapping tiles. `tent` falls to zero at each tile's edges,"
+            " so the blended correction is continuous; `cone` is the earlier scheme,"
+            " zero only at the corners, kept to reproduce earlier results."
+        ),
+    )
     n_parallel_jobs: int = Field(
         1, ge=1, description="Interferograms corrected in parallel."
     )
@@ -410,6 +418,7 @@ class ElevationCorrectionOptions(BaseModel, extra="forbid"):
             order=self.order,
             bin_width=self.bin_width,
             min_samples_per_bin=self.min_samples_per_bin,
+            blend=self.blend,
         )
 
 

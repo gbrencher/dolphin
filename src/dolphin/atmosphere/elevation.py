@@ -21,8 +21,19 @@ before the network is inverted:
    tile. Outside the elevations of the tile's references the correction is
    held at its value at the nearest referenced elevation: an extrapolated
    quadratic reaches tens of centimetres in high relief.
-5. Overlapping tiles are blended with weights that fall linearly from each
-   tile's centre to zero at its corners.
+5. Overlapping tiles are blended. With `blend="tent"` (the default) a tile's
+   weight is the product of two triangles, one along rows and one along
+   columns, each 1 at the tile's centre and falling linearly to zero at its
+   edges. Tiles lie on a regular lattice that starts before the scene, so
+   every pixel is covered by the same number of tiles and the weights sum to
+   a constant when half the tile size is a multiple of the step. The blended
+   correction is then continuous: a tile's contribution vanishes where the
+   tile ends. A tile that grew to find references is fitted on the grown
+   area but applied on its own footprint only. `blend="cone"` is the earlier
+   scheme, kept to reproduce earlier results: tiles start at the scene's
+   first row and column, and weights fall linearly with distance from the
+   centre to zero at the corners, which leaves 29% of the central weight at
+   the middle of each edge and so a step wherever a tile begins or ends.
 
 Every tile's polynomial has a constant term, so the corrected interferogram is
 referenced locally: its zero is the median of coherent ground near each
@@ -82,6 +93,8 @@ class ElevationCorrectionSettings:
     """Elevation bin width, metres."""
     min_samples_per_bin: int = 10
     """Bins with fewer reference pixels are not used in the fit."""
+    blend: str = "tent"
+    """How overlapping tiles are weighted: "tent" (continuous) or "cone"."""
 
 
 @dataclass
@@ -196,6 +209,16 @@ def _blend_weights(n_rows: int, n_cols: int, row_spacing: float, col_spacing: fl
     return (1 - distance / farthest).astype(np.float32)
 
 
+def _tent(start: int, length: int, lo: int, hi: int) -> np.ndarray:
+    """Triangle over a tile of `length` pixels from `start`, sampled on [lo, hi).
+
+    One at the tile's centre, falling linearly to zero half a pixel beyond its
+    first and last pixel centres.
+    """
+    centre = start + (length - 1) / 2
+    return np.clip(1 - np.abs(np.arange(lo, hi) - centre) / (length / 2), 0, None)
+
+
 def correct_elevation_dependence(
     values: ArrayLike,
     elevation: ArrayLike,
@@ -268,10 +291,21 @@ def correct_elevation_dependence(
         inside = (heights >= lowest) & (heights <= highest)
         return heights[inside], values[r0:r1, c0:c1][tile][inside]
 
-    for col0 in range(0, n_cols, step_cols):
-        for row0 in range(0, n_rows, step_rows):
-            r0, r1 = row0, min(row0 + tile_rows, n_rows)
-            c0, c1 = col0, min(col0 + tile_cols, n_cols)
+    if settings.blend not in ("tent", "cone"):
+        msg = f"Unknown blend {settings.blend!r}"
+        raise ValueError(msg)
+    tent = settings.blend == "tent"
+    # The tent lattice starts before the scene so that its first rows and
+    # columns are covered by as many tiles as its interior.
+    first_row = -((tile_rows - 1) // step_rows) * step_rows if tent else 0
+    first_col = -((tile_cols - 1) // step_cols) * step_cols if tent else 0
+
+    for col0 in range(first_col, n_cols, step_cols):
+        for row0 in range(first_row, n_rows, step_rows):
+            r0, r1 = max(row0, 0), min(row0 + tile_rows, n_rows)
+            c0, c1 = max(col0, 0), min(col0 + tile_cols, n_cols)
+            # The tile's own footprint, where a tent-blended fit is applied.
+            a0, a1, b0, b1 = r0, r1, c0, c1
             if not has_value[r0:r1, c0:c1].any():
                 continue
             refs = references(r0, r1, c0, c1)
@@ -312,11 +346,18 @@ def correct_elevation_dependence(
             record.elevation_span = (lowest, highest)
             record.coefficients = [float(c) for c in coefficients]
 
+            if tent:
+                r0, r1, c0, c1 = a0, a1, b0, b1
             tile_elevation = np.clip(
                 elevation[r0:r1, c0:c1].astype(np.float64), lowest, highest
             )
             tile = values[r0:r1, c0:c1] - np.polyval(coefficients, tile_elevation)
-            weights = _blend_weights(r1 - r0, c1 - c0, row_spacing, col_spacing)
+            if tent:
+                weights = np.outer(
+                    _tent(row0, tile_rows, r0, r1), _tent(col0, tile_cols, c0, c1)
+                ).astype(np.float32)
+            else:
+                weights = _blend_weights(r1 - r0, c1 - c0, row_spacing, col_spacing)
             finite = np.isfinite(tile)
             weights[~finite] = 0
             corrected_sum[r0:r1, c0:c1] += (

@@ -65,15 +65,23 @@ def test_removes_the_elevation_signal_and_the_offset():
         values, height, coherence, (30, 30), SMALL_TILES
     )
     assert all(r.status == "success" for r in records)
-    # The blending weight is zero at a tile corner, and an image corner is only
-    # ever a tile corner.
+    # Tent weights are positive over the whole of a tile, image corners included.
+    assert np.isfinite(corrected).all()
+    assert abs(corrected.mean()) < 0.02 and corrected.std() < 0.07
+    assert abs(np.corrcoef(height.ravel(), corrected.ravel())[0, 1]) < 0.1
+
+
+def test_cone_blend_leaves_image_corners_empty():
+    # The earlier scheme: zero weight at a tile corner, and an image corner is
+    # only ever a tile corner.
+    height, coherence, rng = scene()
+    values = stratified(height) + rng.normal(0, 0.05, height.shape)
+    settings = ElevationCorrectionSettings(**{**SMALL_TILES.__dict__, "blend": "cone"})
+    corrected, _ = correct_elevation_dependence(values, height, coherence, (30, 30), settings)
     corners = np.zeros(height.shape, bool)
     corners[[0, 0, -1, -1], [0, -1, 0, -1]] = True
     assert np.isnan(corrected[corners]).all()
-    inner = corrected[~corners]
-    assert np.isfinite(inner).all()
-    assert abs(inner.mean()) < 0.02 and inner.std() < 0.07
-    assert abs(np.corrcoef(height[~corners], inner)[0, 1]) < 0.1
+    assert np.isfinite(corrected[~corners]).all()
 
 
 def test_incoherent_signal_survives_and_nodata_stays():
@@ -125,9 +133,59 @@ def test_tiles_are_sized_in_metres_on_a_non_square_grid():
     _, records = correct_elevation_dependence(
         values, height, coherence, (10, 5), ElevationCorrectionSettings(400, 200)
     )
-    first = records[0]
-    assert first.row_stop - first.row_start == 40
-    assert first.col_stop - first.col_start == 80
+    # Tiles at the scene's edges are clipped; a whole one is 400 m both ways.
+    assert max(r.row_stop - r.row_start for r in records) == 40
+    assert max(r.col_stop - r.col_start for r in records) == 80
+
+
+def _largest_step(field):
+    return max(np.nanmax(np.abs(np.diff(field, axis=0))), np.nanmax(np.abs(np.diff(field, axis=1))))
+
+
+def test_tent_blend_is_continuous_where_tiles_disagree():
+    # A field that jumps by 10 across a line no polynomial in elevation can
+    # follow: tiles on either side fit different constants. With tent weights
+    # the correction crosses the jump over a tile width; with cone weights it
+    # steps wherever a tile begins or ends.
+    rows, cols = 240, 240
+    elevation = np.tile(np.linspace(1000, 2000, rows, dtype="float32")[:, None], (1, cols))
+    values = np.where(np.arange(cols)[None, :] < cols // 2, 0.0, 10.0).astype("float32")
+    values = np.broadcast_to(values, (rows, cols)).copy()
+    # A bin with no spread is not fitted, so the two levels carry a little noise.
+    noise = np.random.default_rng(0).normal(0, 0.01, (rows, cols)).astype("float32")
+    values += noise
+    coherence = np.ones((rows, cols), dtype="float32")
+    steps = {}
+    for blend in ("tent", "cone"):
+        settings = ElevationCorrectionSettings(tile_size=800.0, step=200.0, blend=blend)
+        corrected, _ = correct_elevation_dependence(values, elevation, coherence, (20.0, 20.0), settings)
+        assert blend == "cone" or np.isfinite(corrected).all()
+        correction = values - corrected
+        # Away from the jump itself, where the input is constant.
+        steps[blend] = _largest_step(np.delete(correction, cols // 2, axis=1)[:, : cols - 2])
+    # Crossing 10 over a tile of 40 pixels, the tent's steepest slope is under 1
+    # per pixel; the cone adds its edge steps to that.
+    assert steps["tent"] < 1.0
+    assert steps["cone"] > 1.5 * steps["tent"]
+
+
+def test_tent_blend_covers_the_scene_edges_evenly():
+    rows, cols = 100, 100
+    elevation = np.tile(np.linspace(1000, 2000, rows, dtype="float32")[:, None], (1, cols))
+    values = (0.002 * elevation + 3).astype("float32")
+    coherence = np.ones((rows, cols), dtype="float32")
+    settings = ElevationCorrectionSettings(tile_size=800.0, step=200.0)
+    corrected, records = correct_elevation_dependence(values, elevation, coherence, (20.0, 20.0), settings)
+    assert np.isfinite(corrected).all()
+    assert np.abs(corrected).max() < 0.05
+    # Tiles start before the scene: more of them than a lattice from row 0.
+    assert len(records) > (rows // 10) ** 2
+
+
+def test_unknown_blend_rejected():
+    field = np.ones((10, 10), dtype="float32")
+    with pytest.raises(ValueError, match="blend"):
+        correct_elevation_dependence(field, field, field, (20.0, 20.0), ElevationCorrectionSettings(blend="box"))
 
 
 def test_shape_mismatch_rejected():
